@@ -2,74 +2,67 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Keep your AI system prompts, Cursor rules, Claude skills, and knowledge bases in sync between your IDE and ModelBound.co — automatically. The built-in MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared context, eval results, and token-health insights. Open source, local-first, zero source code leaves your machine.
+Keep your AI system prompts, Cursor rules, Claude skills, and knowledge bases in sync between your IDE and [ModelBound.co](https://modelbound.co) — automatically. The ModelBound MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared context, eval results, and token-health insights. Open source, local-first, zero source code leaves your machine.
 
 ---
 
 ## Features
 
-* **Bi-directional Automation:** Edit markdown prompt states or rules natively inside your IDE. On save (`Cmd+S`), a background file-system listener updates your remote cloud configuration instantly.
-* **Agentic Tooling via MCP:** Exposes native tools directly to Cursor Composer, Claude Engineers, and local AI agents. The model can fetch, patch, and execute context templates itself on command.
-* **Local Isolation Layer:** Keeps all tracking inside a strict local `.modelbound/` boundary. No application source code, operational logic, or credentials ever hit our servers.
+* **Bi-directional Sync:** Edit skills and rules natively inside your IDE. On save, a background file watcher pushes changes back to ModelBound cloud instantly.
+* **IDE-Aware File Placement:** Automatically writes pulled skills to the correct native location for your IDE — `.kiro/skills/`, `.cursor/rules/`, `.claude/`, and `.modelbound/`.
+* **Agentic Tooling via MCP:** The [ModelBound MCP server](https://modelbound.co) exposes 40+ tools to Cursor, Claude Code, Copilot, and any MCP-compatible agent. This extension handles the local filesystem bridge — writing files the MCP server returns and syncing edits back to the cloud.
+* **Local Isolation:** Only files inside `.modelbound/` and detected IDE context directories are watched. No application source code, operational logic, or credentials ever leave your machine.
 
 ---
 
-## Architecture Blueprint
+## How It Works
 
 ```
-+--------------------+               +-------------------------+               +----------------------+
-|  ModelBound Cloud  | <===========> | Local MCP Server (Host) | <===========> |     IDE / Agent      |
-|  (Context Hub)     |   Secure API  | (File Watcher + Sync)   |  Stdio / SSE  | (Cursor, VSCode etc) |
-+--------------------+               +-------------------------+               +----------------------+
-                                              |                                          |
-                                              v                                          v
-                                     +-------------------------+               +----------------------+
-                                     |  Local .modelbound/ dir | <============ | Reads Skills & Rules |
-                                     +-------------------------+               +----------------------+
++--------------------+               +---------------------------+               +---------------------+
+|  ModelBound Cloud  | <===========> |  This Extension (Local)   | <===========> |    IDE / Agent      |
+|  (Context Hub)     |   Secure API  |  File Watcher + Sync      |   Filesystem  | (Cursor, Kiro, etc) |
++--------------------+               +---------------------------+               +---------------------+
+                                                |
+                                                v
+                                     Writes to all detected IDE directories:
+                                     • .modelbound/<skill>.md  (canonical)
+                                     • .kiro/skills/<skill>.md (if .kiro/ exists)
+                                     • .cursor/rules/<skill>.md (if .cursor/ exists)
+                                     • .claude/<skill>.md (if .claude/ exists)
 ```
+
+**The ModelBound MCP server** runs remotely and handles agent-facing tools (fetching skills, searching context, running evals). Since it can't see your local filesystem, this extension acts as the local bridge — writing files to the right places and syncing edits back.
 
 ---
 
-## Privacy & Security Guardrails (Open Source Auditability)
+## Supported IDEs
 
-We take code security seriously. This client integration is explicitly open-sourced so that enterprise security teams can easily verify what data moves off their machines:
+| IDE | Context Directory | Behavior |
+|-----|-------------------|----------|
+| Kiro | `.kiro/skills/` | Writes here if `.kiro/` exists |
+| Cursor | `.cursor/rules/` | Writes here if `.cursor/` exists |
+| Claude Code | `.claude/` | Writes here if `.claude/` exists |
+| Any | `.modelbound/` | Always writes here (canonical) |
 
-1. **Directory Isolation:** The file watcher strictly targets `.modelbound/*` extensions. It is structurally blocked from indexing outside directories.
-2. **Exclusion Manifest:** A `.modelboundignore` definition is included to prevent the accidental tracking of configurations, proprietary backend files, or system assets.
-
----
-
-## Local Setup & Onboarding
-
-### Installation
-
-1. Install the extension directly via the Cursor Extension Marketplace or download the verified compiled distribution package (`.vsix`) from our GitHub Releases page.
-2. Drop the `.vsix` asset straight into your Extension pane settings panel.
-3. On first activation, you'll be prompted to enter your ModelBound.co API key. You can also set or update it anytime via `Cmd+Shift+P` → **"ModelBound: Set API Key"**.
+The extension never creates IDE parent directories from scratch — it only writes into them if they already exist in your workspace.
 
 ---
 
-## Open Source Contribution Workflow
+## Privacy & Security
 
-We welcome community pull requests to improve stability, support additional IDE variants, or extend platform capabilities.
+This extension is open-sourced so enterprise security teams can audit exactly what data moves off their machines:
 
-### Development Quickstart
+1. **Directory Isolation:** The file watcher only targets known context directories. It cannot index outside them.
+2. **Exclusion Manifest:** A `.modelboundignore` file prevents accidental tracking of source code or secrets.
+3. **No telemetry.** No analytics. Just file sync.
 
-1. Fork and pull down the source project target:
+---
 
-```bash
-git clone https://github.com/ModelBound/modelbound-cursor-extension.git
-cd modelbound-cursor-extension
-npm install
-```
+## Installation
 
-2. Run continuous execution loops to watch files:
-
-```bash
-npm run watch
-```
-
-3. Open the directory path inside Cursor or VS Code, click `F5` to spin up the independent **Extension Development Host**, and begin testing changes safely inside an isolated testing instance.
+1. Search **"ModelBound"** in the Cursor/VS Code Extensions panel, or download the `.vsix` from [GitHub Releases](https://github.com/ModelBound/modelbound-cursor-extension/releases).
+2. On first activation, you'll be prompted to enter your ModelBound.co API key.
+3. Update your key anytime via `Cmd+Shift+P` → **"ModelBound: Set API Key"**.
 
 ---
 
@@ -77,7 +70,8 @@ npm run watch
 
 | Command | Description |
 |---------|-------------|
-| `ModelBound: Pull Skill/Context to Local Workspace` | Manually fetch a specific skill/context by ID from ModelBound.co |
+| `ModelBound: Pull Skill/Context to Local Workspace` | Fetch a skill by ID and write it to all detected IDE locations |
+| `ModelBound: Set API Key` | Set or update your ModelBound.co API key |
 
 ---
 
@@ -86,7 +80,27 @@ npm run watch
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `modelbound.apiKey` | string | `""` | Your ModelBound.co Secret API Key |
-| `modelbound.autoSync` | boolean | `true` | Auto-sync `.modelbound/` changes to cloud |
+| `modelbound.autoSync` | boolean | `true` | Auto-sync context file changes back to cloud |
+
+---
+
+## Contributing
+
+1. Clone and install:
+
+```bash
+git clone https://github.com/ModelBound/modelbound-cursor-extension.git
+cd modelbound-cursor-extension
+npm install
+```
+
+2. Watch for changes:
+
+```bash
+npm run watch
+```
+
+3. Press `F5` to launch the Extension Development Host for testing.
 
 ---
 
