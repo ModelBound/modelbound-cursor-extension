@@ -45,17 +45,7 @@ We take code security seriously. This client integration is explicitly open-sour
 
 1. Install the extension directly via the Cursor Extension Marketplace or download the verified compiled distribution package (`.vsix`) from our GitHub Releases page.
 2. Drop the `.vsix` asset straight into your Extension pane settings panel.
-
-### Sync Configuration
-
-Add your explicit authentication configuration inside your main editor profile preferences (`settings.json`):
-
-```json
-{
-  "modelbound.apiKey": "mb_live_your_secure_token_here",
-  "modelbound.autoSync": true
-}
-```
+3. On first activation, you'll be prompted to enter your ModelBound.co API key. You can also set or update it anytime via `Cmd+Shift+P` → **"ModelBound: Set API Key"**.
 
 ---
 
