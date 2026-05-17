@@ -3,7 +3,7 @@
   "displayName": "ModelBound — AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Sync AI system prompts, skills, rules, and knowledge bases between your IDE and ModelBound.co. Built-in MCP server exposes 40+ tools to Cursor, Claude, and Copilot.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -55,7 +55,6 @@
     "watch": "tsc -watch -p ./"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
     "axios": "^1.6.0",
     "chokidar": "^3.6.0"
   },

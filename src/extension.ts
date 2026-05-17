@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import chokidar from 'chokidar';
 import axios from 'axios';
-import { startMcpServer, stopMcpServer } from './mcpServer';
 
 let fileWatcher: chokidar.FSWatcher | null = null;
 
@@ -72,6 +71,12 @@ function getSkillOutputPaths(workspaceRoot: string, skillId: string): string[] {
     paths.push(path.join(cursorRules, `${skillId}.md`));
   }
 
+  // Write to .claude/ if it exists
+  const claudeDir = path.join(workspaceRoot, '.claude');
+  if (fs.existsSync(claudeDir)) {
+    paths.push(path.join(claudeDir, `${skillId}.md`));
+  }
+
   return paths;
 }
 
@@ -113,17 +118,7 @@ export async function activate(context: vscode.ExtensionContext) {
     fs.mkdirSync(localFolder, { recursive: true });
   }
 
-  // 2. Spin up the native, in-process MCP Server for AI Agent routing
-  if (apiKey) {
-    try {
-      startMcpServer(apiKey, localFolder);
-      console.log('ModelBound MCP Server activated.');
-    } catch (err) {
-      vscode.window.showErrorMessage(`Failed to start ModelBound MCP: ${err}`);
-    }
-  }
-
-  // 3. File System Watcher: Watch all IDE-native context directories
+  // 2. File System Watcher: Watch all IDE-native context directories
   if (autoSync && apiKey) {
     const watchedFolders = getWatchedFolders(workspaceRoot);
 
@@ -162,7 +157,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
   }
 
-  // 4. Command Palette Route: Manual Force-Pull (writes to all IDE-native locations)
+  // 3. Command Palette Route: Manual Force-Pull (writes to all IDE-native locations)
   let pullCommand = vscode.commands.registerCommand('modelbound.pullSkill', async () => {
     const skillId = await vscode.window.showInputBox({ prompt: 'Enter ModelBound Skill ID' });
     if (!skillId || !apiKey) return;
@@ -185,7 +180,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // 5. Command Palette Route: Set/Update API Key
+  // 4. Command Palette Route: Set/Update API Key
   let setKeyCommand = vscode.commands.registerCommand('modelbound.setApiKey', async () => {
     const input = await vscode.window.showInputBox({
       prompt: 'Enter your ModelBound.co API Key',
@@ -206,5 +201,4 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   if (fileWatcher) fileWatcher.close();
-  stopMcpServer();
 }
