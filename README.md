@@ -1,8 +1,8 @@
-# ModelBound Context Sync & MCP Server (IDE Extension)
+# ModelBound — AI Context, Skills & MCP Sync for Cursor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-The official open-source extension for syncing AI rulesets, system prompts, and technical contexts directly between your local workspace and [ModelBound.co](https://modelbound.co). Compatible with **Cursor**, **VS Code**, and any development workspace leveraging the **Model Context Protocol (MCP)**.
+Keep your AI system prompts, Cursor rules, Claude skills, and knowledge bases in sync between your IDE and ModelBound.co — automatically. The built-in MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared context, eval results, and token-health insights. Open source, local-first, zero source code leaves your machine.
 
 ---
 
