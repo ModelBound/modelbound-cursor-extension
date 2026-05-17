@@ -2,8 +2,8 @@
   "name": "modelbound-cursor-extension",
   "displayName": "ModelBound Context Sync & MCP Server",
   "description": "Seamlessly sync local AI contexts, rules, and prompts with ModelBound.co using native file watchers and MCP.",
-  "version": "1.0.0",
-  "publisher": "modelbound",
+  "version": "1.0.1",
+  "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
     "type": "git",
