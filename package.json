@@ -3,7 +3,7 @@
   "displayName": "ModelBound",
   "icon": "logo_modelbound.png",
   "description": "Seamlessly sync local AI contexts, rules, and prompts with ModelBound.co using native file watchers and MCP.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -42,6 +42,10 @@
       {
         "command": "modelbound.pullSkill",
         "title": "ModelBound: Pull Skill/Context to Local Workspace"
+      },
+      {
+        "command": "modelbound.setApiKey",
+        "title": "ModelBound: Set API Key"
       }
     ]
   },

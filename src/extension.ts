@@ -12,9 +12,33 @@ export async function activate(context: vscode.ExtensionContext) {
   if (!workspaceRoot) return;
 
   const config = vscode.workspace.getConfiguration('modelbound');
-  const apiKey = config.get<string>('apiKey');
+  let apiKey = config.get<string>('apiKey');
   const autoSync = config.get<boolean>('autoSync');
   const localFolder = path.join(workspaceRoot, '.modelbound');
+
+  // 0. Onboarding: Prompt for API key if not configured
+  if (!apiKey) {
+    const action = await vscode.window.showInformationMessage(
+      'ModelBound: No API key configured. Would you like to set one now?',
+      'Enter API Key',
+      'Later'
+    );
+
+    if (action === 'Enter API Key') {
+      const input = await vscode.window.showInputBox({
+        prompt: 'Enter your ModelBound.co API Key',
+        placeHolder: 'mb_live_...',
+        password: true,
+        ignoreFocusOut: true
+      });
+
+      if (input) {
+        await config.update('apiKey', input, vscode.ConfigurationTarget.Global);
+        apiKey = input;
+        vscode.window.showInformationMessage('ModelBound: API key saved successfully.');
+      }
+    }
+  }
 
   // 1. Ensure workspace isolation directory exists
   if (!fs.existsSync(localFolder)) {
@@ -79,7 +103,23 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  context.subscriptions.push(pullCommand);
+  // 5. Command Palette Route: Set/Update API Key
+  let setKeyCommand = vscode.commands.registerCommand('modelbound.setApiKey', async () => {
+    const input = await vscode.window.showInputBox({
+      prompt: 'Enter your ModelBound.co API Key',
+      placeHolder: 'mb_live_...',
+      password: true,
+      ignoreFocusOut: true
+    });
+
+    if (input) {
+      const cfg = vscode.workspace.getConfiguration('modelbound');
+      await cfg.update('apiKey', input, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage('ModelBound: API key updated. Reload window to apply.');
+    }
+  });
+
+  context.subscriptions.push(pullCommand, setKeyCommand);
 }
 
 export function deactivate() {
