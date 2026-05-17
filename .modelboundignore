@@ -1,0 +1,28 @@
+# ModelBound Ignore File
+# Prevents application source code and sensitive files from being tracked
+
+# Application source code
+src/
+out/
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.cert
+
+# IDE and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.vsix
+
+# Git
+.git/

@@ -1,0 +1,62 @@
+{
+  "name": "modelbound-cursor-extension",
+  "displayName": "ModelBound Context Sync & MCP Server",
+  "description": "Seamlessly sync local AI contexts, rules, and prompts with ModelBound.co using native file watchers and MCP.",
+  "version": "1.0.0",
+  "publisher": "modelbound",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ModelBound/modelbound-cursor-extension.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "ModelBound Configuration",
+      "properties": {
+        "modelbound.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your ModelBound.co Secret API Key."
+        },
+        "modelbound.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, changes to files inside `.modelbound/` automatically sync back to the cloud."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "modelbound.pullSkill",
+        "title": "ModelBound: Pull Skill/Context to Local Workspace"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.6.0",
+    "chokidar": "^3.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
