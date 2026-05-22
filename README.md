@@ -1,17 +1,34 @@
-# ModelBound — AI Context, Skills & MCP Sync for Cursor
+# ModelBound — Cursor Rules Sync, AI Skills Manager & MCP Prompt Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Keep your AI system prompts, Cursor rules, Claude skills, and knowledge bases in sync between your IDE and [ModelBound.co](https://modelbound.co) — automatically. The ModelBound MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared context, eval results, and token-health insights. Open source, local-first, zero source code leaves your machine.
+**The system prompt version control layer for your IDE.** Keep your Cursor rules, Claude Code skills, `.cursorrules`, and AI knowledge bases in sync between your workspace and [ModelBound.co](https://modelbound.co) — automatically. The ModelBound MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared prompts, eval results, and token-health insights.
+
+Open source. Local-first. Zero source code leaves your machine.
+
+---
+
+## Why ModelBound?
+
+If you've ever dealt with:
+- `.cursorrules` files drifting out of sync across repos
+- Manually copying system prompts between Cursor, Claude, and Copilot
+- No version history for your AI rules and context
+- Wanting an MCP prompt server that actually works with your IDE
+
+This extension solves all of it.
 
 ---
 
 ## Features
 
-* **Bi-directional Sync:** Edit skills and rules natively inside your IDE. On save, a background file watcher pushes changes back to ModelBound cloud instantly.
+* **Cursor Rules Sync:** Edit `.cursor/rules/` files natively. On save, changes push to ModelBound cloud and stay versioned.
+* **`.cursorrules` Manager:** Pull shared rules from your team's ModelBound workspace directly into your local Cursor config.
+* **Claude Code Skills Sync:** Same bi-directional sync for `.claude/` — your Claude skills stay current across machines.
+* **System Prompt Version Control:** Every edit is tracked. Roll back, branch, or share prompts across your team from the ModelBound dashboard.
+* **MCP Prompt Server:** The [ModelBound MCP server](https://modelbound.co) exposes 40+ tools to any MCP-compatible agent. This extension handles the local filesystem bridge — writing files and syncing edits back to the cloud.
 * **IDE-Aware File Placement:** Automatically writes pulled skills to the correct native location for your IDE — `.kiro/skills/`, `.cursor/rules/`, `.claude/`, and `.modelbound/`.
-* **Agentic Tooling via MCP:** The [ModelBound MCP server](https://modelbound.co) exposes 40+ tools to Cursor, Claude Code, Copilot, and any MCP-compatible agent. This extension handles the local filesystem bridge — writing files the MCP server returns and syncing edits back to the cloud.
-* **Local Isolation:** Only files inside `.modelbound/` and detected IDE context directories are watched. No application source code, operational logic, or credentials ever leave your machine.
+* **Local Isolation:** Only context directories are watched. No application source code, credentials, or telemetry ever leave your machine.
 
 ---
 
@@ -35,16 +52,26 @@ Keep your AI system prompts, Cursor rules, Claude skills, and knowledge bases in
 
 ---
 
-## Supported IDEs
+## Supported IDEs & Tools
 
-| IDE | Context Directory | Behavior |
-|-----|-------------------|----------|
-| Kiro | `.kiro/skills/` | Writes here if `.kiro/` exists |
-| Cursor | `.cursor/rules/` | Writes here if `.cursor/` exists |
-| Claude Code | `.claude/` | Writes here if `.claude/` exists |
-| Any | `.modelbound/` | Always writes here (canonical) |
+| IDE / Tool | Context Directory | What Syncs |
+|------------|-------------------|------------|
+| Cursor | `.cursor/rules/` | Cursor rules, .cursorrules |
+| Kiro | `.kiro/skills/` | Skills and steering files |
+| Claude Code | `.claude/` | Claude skills and context |
+| Copilot | `.github/` | Copilot instructions (coming soon) |
+| Any MCP client | `.modelbound/` | All skills (canonical) |
 
 The extension never creates IDE parent directories from scratch — it only writes into them if they already exist in your workspace.
+
+---
+
+## Use Cases
+
+- **Team prompt libraries:** Share system prompts and Cursor rules across your org. Everyone pulls from the same source of truth.
+- **Multi-IDE workflows:** Use Cursor and Claude Code on the same project? Edits in either sync back to ModelBound and propagate to both.
+- **Prompt version control:** Track changes to your AI rules over time. See who changed what and roll back if needed.
+- **MCP-native agents:** Let your AI agent fetch and scaffold context directly via the ModelBound MCP server — no manual file management.
 
 ---
 
