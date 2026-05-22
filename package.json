@@ -3,7 +3,7 @@
   "displayName": "ModelBound — AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Sync AI system prompts, skills, rules, and knowledge bases between your IDE and ModelBound.co. Built-in MCP server exposes 40+ tools to Cursor, Claude, and Copilot.",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -34,7 +34,12 @@
         "modelbound.autoSync": {
           "type": "boolean",
           "default": true,
-          "description": "When enabled, changes to files inside `.modelbound/` automatically sync back to the cloud."
+          "description": "When enabled, changes to context files (.modelbound, .kiro/skills, .cursor/rules, .claude) automatically sync to ModelBound."
+        },
+        "modelbound.mcpUrl": {
+          "type": "string",
+          "default": "https://mcp.modelbound.co/mcp",
+          "description": "ModelBound MCP Streamable HTTP endpoint."
         }
       }
     },
@@ -54,10 +59,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./"
   },
-  "dependencies": {
-    "axios": "^1.6.0",
-    "chokidar": "^3.6.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
