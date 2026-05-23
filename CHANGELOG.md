@@ -2,6 +2,15 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.4.0] - 2026-05-23
+
+### Fixed
+- **Repo detection is now robust and per-sync.** Previously `repo_url` was probed once at activation with `git config --get remote.origin.url` and any failure silently fell through to "no repo association" for the whole session. Skills synced from valid repos could end up unlinked on ModelBound.
+- Resolves the git toplevel with `git -C <root> rev-parse --show-toplevel` so workspaces opened at a subfolder of the repo work correctly.
+- Falls back to the first available remote when `origin` doesn't exist (covers forks named `upstream`, multi-remote setups, etc.).
+- Re-detects repo info on **every** sync/delete call — repos initialized after activation are picked up without restarting the IDE.
+- Adds a "ModelBound" output channel that logs activation state, each sync, and the underlying git error when remote detection fails — makes future "why isn't my skill linked?" issues debuggable in seconds.
+
 ## [1.3.0] - 2026-05-22
 
 ### Added

@@ -11,24 +11,76 @@ const WATCH_GLOBS = [
 ];
 
 const watchers: vscode.FileSystemWatcher[] = [];
+let outputChannel: vscode.OutputChannel | undefined;
+
+function log(msg: string): void {
+  if (!outputChannel) outputChannel = vscode.window.createOutputChannel('ModelBound');
+  outputChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+}
 
 type RepoInfo = { repoUrl: string | null; branch: string | null };
 
+/**
+ * Resolve git repo metadata from a workspace folder.
+ *
+ * Robust against:
+ *  - workspace opened at a subfolder of the repo (uses `rev-parse --show-toplevel`)
+ *  - repos whose primary remote isn't called `origin` (falls back to `git remote` list)
+ *  - repos initialized after the extension activated (re-detected on every sync)
+ */
 function getRepoInfo(workspaceRoot: string): RepoInfo {
+  const run = (args: string[]): string => {
+    return execSync(`git ${args.join(' ')}`, {
+      cwd: workspaceRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+      .toString()
+      .trim();
+  };
+
+  let toplevel = workspaceRoot;
   try {
-    const run = (cmd: string) =>
-      execSync(cmd, { cwd: workspaceRoot, stdio: ['ignore', 'pipe', 'ignore'] })
-        .toString()
-        .trim();
-    const remote = run('git config --get remote.origin.url');
-    const branch = run('git rev-parse --abbrev-ref HEAD');
-    const repoUrl = remote
-      .replace(/^git@([^:]+):/, 'https://$1/')
-      .replace(/\.git$/, '');
-    return { repoUrl, branch };
-  } catch {
+    toplevel = run(['-C', JSON.stringify(workspaceRoot), 'rev-parse', '--show-toplevel']) || workspaceRoot;
+  } catch (err) {
+    log(`getRepoInfo: not a git repo at ${workspaceRoot} (${(err as Error).message?.split('\n')[0] ?? 'unknown'})`);
     return { repoUrl: null, branch: null };
   }
+
+  const runIn = (args: string[]): string =>
+    execSync(`git ${['-C', JSON.stringify(toplevel), ...args].join(' ')}`, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+      .toString()
+      .trim();
+
+  let branch: string | null = null;
+  try {
+    branch = runIn(['rev-parse', '--abbrev-ref', 'HEAD']) || null;
+  } catch {
+    branch = null;
+  }
+
+  // Try `origin` first, then fall back to the first remote we find.
+  let remote = '';
+  try {
+    remote = runIn(['config', '--get', 'remote.origin.url']);
+  } catch {
+    try {
+      const remotes = runIn(['remote']).split(/\s+/).filter(Boolean);
+      if (remotes.length > 0) {
+        remote = runIn(['remote', 'get-url', remotes[0]]);
+      }
+    } catch (err) {
+      log(`getRepoInfo: no usable remote at ${toplevel} (${(err as Error).message?.split('\n')[0] ?? 'unknown'})`);
+    }
+  }
+
+  if (!remote) return { repoUrl: null, branch };
+
+  const repoUrl = remote
+    .replace(/^git@([^:]+):/, 'https://$1/')
+    .replace(/\.git$/, '');
+  return { repoUrl, branch };
 }
 
 function detectIde(): string {
@@ -143,12 +195,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 2. Set up file watchers (add/change/delete) for every glob
   if (autoSync && apiKey) {
-    const { repoUrl, branch } = getRepoInfo(workspaceRoot);
     const ide = detectIde();
 
-    if (!repoUrl) {
+    // Initial probe so we can warn the user once at activation. The actual
+    // repo info used per-sync is re-detected on every call below — that way
+    // we pick up remotes that get added after activation (e.g. user runs
+    // `git remote add origin …` in a fresh workspace).
+    const initial = getRepoInfo(workspaceRoot);
+    log(`Activated. ide=${ide} workspace=${workspaceRoot} repo=${initial.repoUrl ?? 'none'} branch=${initial.branch ?? 'none'}`);
+    if (!initial.repoUrl) {
       vscode.window.showInformationMessage(
-        'ModelBound: no git remote detected — skills will sync without repo association.'
+        'ModelBound: no git remote detected — skills will sync without repo association. Run "git remote add origin <url>" and save a skill to re-detect. See the ModelBound output channel for details.'
       );
     }
 
@@ -159,6 +216,9 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
       try {
         const content = fs.readFileSync(filePath, 'utf8');
+        // Re-detect on every sync — cheap, and handles repos initialized
+        // mid-session or workspaces whose git state changes.
+        const { repoUrl, branch } = getRepoInfo(workspaceRoot);
         await callMcpTool(mcpUrl, apiKey!, 'sync_skill_from_ide', {
           repo_url: repoUrl,
           branch,
@@ -166,9 +226,11 @@ export async function activate(context: vscode.ExtensionContext) {
           relative_path: relPath(workspaceRoot, filePath),
           content,
         });
+        log(`Synced ${skillId} (repo=${repoUrl ?? 'none'})`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        log(`Sync failed for ${skillId}: ${msg}`);
         vscode.window.showErrorMessage(`ModelBound sync failed for ${skillId}: ${msg}`);
       }
     };
@@ -177,6 +239,7 @@ export async function activate(context: vscode.ExtensionContext) {
       const filePath = uri.fsPath;
       const skillId = path.basename(filePath, path.extname(filePath));
       try {
+        const { repoUrl } = getRepoInfo(workspaceRoot);
         await callMcpTool(mcpUrl, apiKey!, 'delete_skill_from_ide', {
           repo_url: repoUrl,
           relative_path: relPath(workspaceRoot, filePath),
@@ -184,6 +247,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.setStatusBarMessage(`$(trash) ModelBound: Removed ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        log(`Delete failed for ${skillId}: ${msg}`);
         vscode.window.showErrorMessage(`ModelBound delete failed for ${skillId}: ${msg}`);
       }
     };
