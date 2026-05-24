@@ -8,6 +8,7 @@ const WATCH_GLOBS = [
   '.kiro/skills/**/*.md',
   '.cursor/rules/**/*.md',
   '.claude/**/*.md',
+  '.agents/skills/**/SKILL.md',
 ];
 
 const watchers: vscode.FileSystemWatcher[] = [];
@@ -22,11 +23,6 @@ type RepoInfo = { repoUrl: string | null; branch: string | null };
 
 /**
  * Resolve git repo metadata from a workspace folder.
- *
- * Robust against:
- *  - workspace opened at a subfolder of the repo (uses `rev-parse --show-toplevel`)
- *  - repos whose primary remote isn't called `origin` (falls back to `git remote` list)
- *  - repos initialized after the extension activated (re-detected on every sync)
  */
 function getRepoInfo(workspaceRoot: string): RepoInfo {
   const run = (args: string[]): string => {
@@ -60,7 +56,6 @@ function getRepoInfo(workspaceRoot: string): RepoInfo {
     branch = null;
   }
 
-  // Try `origin` first, then fall back to the first remote we find.
   let remote = '';
   try {
     remote = runIn(['config', '--get', 'remote.origin.url']);
@@ -100,13 +95,16 @@ function relPath(workspaceRoot: string, fsPath: string): string {
  * Call an MCP tool over Streamable HTTP. The spec requires
  * Accept: application/json, text/event-stream — without it,
  * compliant servers respond with 406.
+ *
+ * Returns the parsed JSON-RPC `result` payload (or null if the
+ * server returned no result, e.g. for fire-and-forget calls).
  */
 async function callMcpTool(
   mcpUrl: string,
   apiKey: string,
   name: string,
   args: Record<string, unknown>
-): Promise<void> {
+): Promise<any> {
   const res = await fetch(mcpUrl, {
     method: 'POST',
     headers: {
@@ -125,6 +123,46 @@ async function callMcpTool(
     const body = await res.text();
     throw new Error(`MCP ${name} failed: ${res.status} ${body}`);
   }
+
+  const contentType = res.headers.get('content-type') || '';
+  let body = '';
+  if (contentType.includes('text/event-stream')) {
+    // Take the last data: line of the SSE stream.
+    const raw = await res.text();
+    const dataLines = raw
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trim())
+      .filter(Boolean);
+    body = dataLines[dataLines.length - 1] || '';
+  } else {
+    body = await res.text();
+  }
+
+  if (!body) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (parsed?.error) {
+    throw new Error(`MCP ${name} error: ${parsed.error.message || JSON.stringify(parsed.error)}`);
+  }
+  // tools/call results follow `{ content: [{ type, text }], structuredContent? }`.
+  // Prefer structuredContent if present, otherwise try to JSON-parse the first text block.
+  const result = parsed?.result ?? null;
+  if (!result) return null;
+  if (result.structuredContent) return result.structuredContent;
+  const txt = result.content?.[0]?.text;
+  if (typeof txt === 'string') {
+    try {
+      return JSON.parse(txt);
+    } catch {
+      return { text: txt };
+    }
+  }
+  return result;
 }
 
 function getSkillOutputPaths(workspaceRoot: string, skillId: string): string[] {
@@ -154,6 +192,83 @@ function getSkillOutputPaths(workspaceRoot: string, skillId: string): string[] {
   }
 
   return paths;
+}
+
+/**
+ * Try to infer a ModelBound skill identifier (UUID or slug) from the active
+ * editor file path. Supports `.agents/skills/<slug>/SKILL.md`,
+ * `.modelbound/<id>.md`, `.kiro/skills/<id>.md`, `.cursor/rules/<id>.md`,
+ * and `.claude/<id>.md`.
+ *
+ * The MCP server resolves slugs to skill UUIDs server-side.
+ */
+function detectActiveSkillId(workspaceRoot: string): string | null {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return null;
+  const rel = relPath(workspaceRoot, editor.document.uri.fsPath);
+
+  const agents = rel.match(/^\.agents\/skills\/([^/]+)\/SKILL\.md$/);
+  if (agents) return agents[1];
+
+  const generic = rel.match(/^(?:\.modelbound|\.kiro\/skills|\.cursor\/rules|\.claude)\/([^/]+)\.(?:md|json)$/);
+  if (generic) return generic[1];
+
+  return null;
+}
+
+function pipelineHtml(skillId: string): string {
+  // Minimal, theme-aware status panel. Polls every 2s via postMessage.
+  return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<style>
+  body { font-family: var(--vscode-font-family); padding: 14px; color: var(--vscode-foreground); }
+  h2 { margin: 0 0 4px; font-size: 14px; }
+  .sub { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--vscode-panel-border); font-size: 12px; }
+  .badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .b-pass { background: rgba(46, 160, 67, 0.18); color: #3fb950; }
+  .b-fail { background: rgba(248, 81, 73, 0.18); color: #f85149; }
+  .b-run  { background: rgba(56, 139, 253, 0.18); color: #58a6ff; }
+  .b-idle { background: rgba(139, 148, 158, 0.18); color: #8b949e; }
+  pre { background: var(--vscode-textCodeBlock-background); padding: 8px; border-radius: 4px; font-size: 11px; overflow-x: auto; }
+  .meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
+</style>
+</head>
+<body>
+<h2>Skill Development Pipeline</h2>
+<div class="sub">Skill: <code>${skillId}</code></div>
+<div id="root"><div class="meta">Loading status…</div></div>
+<script>
+  const vscodeApi = acquireVsCodeApi();
+  function render(state) {
+    const root = document.getElementById('root');
+    if (!state) { root.innerHTML = '<div class="meta">No runs yet. Commit a change in the ModelBound editor or call run_skill_pipeline.</div>'; return; }
+    const stages = state.stage_results || {};
+    const stageRow = (key, label) => {
+      const s = stages[key];
+      const status = s?.status || 'idle';
+      const cls = status === 'passed' ? 'b-pass' : status === 'failed' ? 'b-fail' : status === 'running' ? 'b-run' : 'b-idle';
+      const detail = s?.summary || s?.failed_reason || '';
+      return '<div class="row"><span class="badge ' + cls + '">' + status + '</span><strong>' + label + '</strong><span class="meta" style="margin-left:auto">' + (detail || '') + '</span></div>';
+    };
+    root.innerHTML =
+      '<div class="meta">Run ' + (state.id || '').slice(0,8) + ' · v' + (state.version || '—') + ' · ' + (state.status || 'unknown') + '</div>' +
+      stageRow('test_optimize', 'Test & Optimize') +
+      stageRow('production', 'Production') +
+      '<pre>' + JSON.stringify(state.stage_results || {}, null, 2) + '</pre>';
+  }
+  window.addEventListener('message', (ev) => {
+    if (ev.data?.type === 'state') render(ev.data.state);
+    if (ev.data?.type === 'error') {
+      document.getElementById('root').innerHTML = '<div class="meta" style="color:#f85149">' + ev.data.message + '</div>';
+    }
+  });
+  vscodeApi.postMessage({ type: 'ready' });
+</script>
+</body>
+</html>`;
 }
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -196,11 +311,6 @@ export async function activate(context: vscode.ExtensionContext) {
   // 2. Set up file watchers (add/change/delete) for every glob
   if (autoSync && apiKey) {
     const ide = detectIde();
-
-    // Initial probe so we can warn the user once at activation. The actual
-    // repo info used per-sync is re-detected on every call below — that way
-    // we pick up remotes that get added after activation (e.g. user runs
-    // `git remote add origin …` in a fresh workspace).
     const initial = getRepoInfo(workspaceRoot);
     log(`Activated. ide=${ide} workspace=${workspaceRoot} repo=${initial.repoUrl ?? 'none'} branch=${initial.branch ?? 'none'}`);
     if (!initial.repoUrl) {
@@ -216,8 +326,6 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
       try {
         const content = fs.readFileSync(filePath, 'utf8');
-        // Re-detect on every sync — cheap, and handles repos initialized
-        // mid-session or workspaces whose git state changes.
         const { repoUrl, branch } = getRepoInfo(workspaceRoot);
         await callMcpTool(mcpUrl, apiKey!, 'sync_skill_from_ide', {
           repo_url: repoUrl,
@@ -263,7 +371,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   }
 
-  // 3. Manual pull command (still uses REST GET — read-only, keeps existing behavior)
+  // 3. Manual pull command
   const pullCommand = vscode.commands.registerCommand('modelbound.pullSkill', async () => {
     const skillId = await vscode.window.showInputBox({
       prompt: 'Enter ModelBound Skill ID',
@@ -306,7 +414,108 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  context.subscriptions.push(pullCommand, setKeyCommand);
+  // 5. Run Skill Development Pipeline
+  const runPipelineCommand = vscode.commands.registerCommand('modelbound.runSkillPipeline', async () => {
+    if (!apiKey) {
+      vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
+      return;
+    }
+
+    let skillId = detectActiveSkillId(workspaceRoot);
+    if (!skillId) {
+      const entered = await vscode.window.showInputBox({
+        prompt: 'Enter the ModelBound Skill ID (UUID or slug) to run the pipeline against',
+        placeHolder: 'e.g. my-deploy-skill or 8f3b...',
+        ignoreFocusOut: true,
+      });
+      if (!entered) return;
+      skillId = entered.trim();
+    }
+
+    const stage = await vscode.window.showQuickPick(
+      [
+        { label: 'Full pipeline', description: 'Test & Optimize, then Production', value: 'full' },
+        { label: 'Test & Optimize only', description: 'Run gates without publishing', value: 'test_optimize' },
+        { label: 'Production only', description: 'Skip gates and publish', value: 'production' },
+      ],
+      { placeHolder: 'Select pipeline stage' }
+    );
+    if (!stage) return;
+
+    let targets: string[] = ['save'];
+    if (stage.value !== 'test_optimize') {
+      const picked = await vscode.window.showQuickPick(
+        [
+          { label: 'Save new version', value: 'save', picked: true },
+          { label: 'Publish to Marketplace', value: 'marketplace' },
+          { label: 'Export to Claude', value: 'claude_export' },
+        ],
+        { placeHolder: 'Production targets', canPickMany: true }
+      );
+      if (!picked || picked.length === 0) return;
+      targets = picked.map((p) => (p as any).value);
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      'modelboundPipeline',
+      `ModelBound Pipeline · ${skillId}`,
+      vscode.ViewColumn.Beside,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    panel.webview.html = pipelineHtml(skillId);
+
+    let polling = true;
+    let lastRunId: string | null = null;
+
+    panel.onDidDispose(() => {
+      polling = false;
+    });
+
+    vscode.window.setStatusBarMessage(`$(rocket) ModelBound: Pipeline starting for ${skillId}...`, 4000);
+
+    try {
+      const start = await callMcpTool(mcpUrl, apiKey, 'run_skill_pipeline', {
+        skill_id: skillId,
+        stage: stage.value,
+        targets,
+      });
+      lastRunId = start?.run_id || start?.id || null;
+      log(`Pipeline started for ${skillId} (run=${lastRunId ?? 'unknown'})`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      panel.webview.postMessage({ type: 'error', message: msg });
+      vscode.window.showErrorMessage(`ModelBound pipeline failed to start: ${msg}`);
+      return;
+    }
+
+    // Poll every 2s until status is terminal or the panel is closed.
+    const TERMINAL = new Set(['passed', 'failed', 'completed', 'errored', 'skipped']);
+    while (polling) {
+      try {
+        const status = await callMcpTool(mcpUrl, apiKey, 'get_skill_pipeline_status', {
+          skill_id: skillId,
+          limit: 1,
+        });
+        const latest = status?.runs?.[0] || null;
+        panel.webview.postMessage({ type: 'state', state: latest });
+        if (latest && TERMINAL.has(latest.status)) {
+          vscode.window.setStatusBarMessage(
+            `$(${latest.status === 'passed' || latest.status === 'completed' ? 'check' : 'error'}) ModelBound: Pipeline ${latest.status}`,
+            5000
+          );
+          break;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        panel.webview.postMessage({ type: 'error', message: msg });
+        log(`Pipeline poll failed: ${msg}`);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  });
+
+  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand);
 }
 
 export function deactivate() {
