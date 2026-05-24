@@ -1,9 +1,9 @@
 {
   "name": "modelbound-cursor-extension",
-  "displayName": "ModelBound — AI Context, Skills & MCP Sync for Cursor",
+  "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -28,7 +28,10 @@
     "prompt version control",
     "cursor rules sync",
     "MCP server",
-    "AI rules manager"
+    "AI rules manager",
+    "skill pipeline",
+    "CI/CD for prompts",
+    "agent CI"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -63,6 +66,10 @@
       {
         "command": "modelbound.setApiKey",
         "title": "ModelBound: Set API Key"
+      },
+      {
+        "command": "modelbound.runSkillPipeline",
+        "title": "ModelBound: Run Skill Development Pipeline"
       }
     ]
   },
