@@ -2,6 +2,17 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.5.0] - 2026-05-24
+
+### Added
+- **Run Skill Development Pipeline** — new command `ModelBound: Run Skill Development Pipeline` (palette / `modelbound.runSkillPipeline`) triggers the CI/CD-style pipeline (Test & Optimize → Production) for the active skill. Auto-detects the skill from `.agents/skills/<slug>/SKILL.md`, `.modelbound/<id>.md`, `.kiro/skills/<id>.md`, `.cursor/rules/<id>.md`, and `.claude/<id>.md`; falls back to a prompt if no skill file is open.
+- **Live status webview** — opens beside the editor and polls `get_skill_pipeline_status` every 2s, rendering per-stage status (idle / running / passed / failed) for Test & Optimize and Production, with the underlying `stage_results` JSON for debugging.
+- **Stage and target picker** — choose Full / Test & Optimize / Production-only, and multi-select production targets (Save, Marketplace, Claude Export) before the run starts.
+- **`.agents/skills/**/SKILL.md`** added to the watcher globs so Anthropic-style agent skills sync to ModelBound on save alongside the existing `.modelbound`, `.kiro`, `.cursor`, and `.claude` locations.
+
+### Changed
+- `callMcpTool` now parses both `application/json` and `text/event-stream` MCP responses and returns the JSON-RPC `structuredContent` (or the parsed `text` block) so command handlers can act on tool output. Existing `sync_skill_from_ide` / `delete_skill_from_ide` calls keep their fire-and-forget behavior because they ignore the return value.
+
 ## [1.4.0] - 2026-05-23
 
 ### Fixed
