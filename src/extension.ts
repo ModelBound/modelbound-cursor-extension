@@ -371,7 +371,8 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   }
 
-  // 3. Manual pull command
+  // 3. Manual pull command — routes through MCP `get_skill` so usage is tracked
+  // server-side (powers per-skill invocation_count / last_invoked_at metrics).
   const pullCommand = vscode.commands.registerCommand('modelbound.pullSkill', async () => {
     const skillId = await vscode.window.showInputBox({
       prompt: 'Enter ModelBound Skill ID',
@@ -379,15 +380,23 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!skillId || !apiKey) return;
 
     try {
-      const res = await fetch(`https://api.modelbound.co/v1/skills/${skillId}`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
+      // Pass both `file_id` and `skill_id` for forward/backward compatibility
+      // with the hosted MCP server's get_skill handler.
+      const data = await callMcpTool(mcpUrl, apiKey, 'get_skill', {
+        file_id: skillId,
+        skill_id: skillId,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { content: string };
+      const content: string =
+        (data && typeof data === 'object' && 'text' in data && typeof (data as any).text === 'string'
+          ? (data as any).text
+          : typeof data === 'string'
+            ? data
+            : '') || '';
+      if (!content) throw new Error('Skill not found or empty');
 
       const outputPaths = getSkillOutputPaths(workspaceRoot, skillId);
       for (const destPath of outputPaths) {
-        fs.writeFileSync(destPath, data.content, 'utf8');
+        fs.writeFileSync(destPath, content, 'utf8');
       }
       const locations = outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ');
       vscode.window.showInformationMessage(`Pulled ${skillId} → ${locations}`);

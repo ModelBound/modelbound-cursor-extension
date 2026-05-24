@@ -49,3 +49,6 @@ All notable changes to the "ModelBound Context Sync & MCP Server" extension will
 - Chokidar-based file watcher for automatic cloud sync on save
 - Configuration options for API key and auto-sync toggle
 - `.modelboundignore` security manifest to prevent source code tracking
+
+## 1.5.1
+- Pull command now uses MCP `get_skill` so skill invocations are tracked in ModelBound (powers per-skill usage analytics on the Git Integrations page).
