@@ -2,6 +2,12 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.5.2] - 2026-05-25
+
+### Fixed
+- **"Failed to pull context: fetch failed"** — `callMcpTool` now unwraps undici's generic `fetch failed` error and surfaces the real network cause (DNS / IPv6 / proxy / TLS) with `code`, `errno`, `syscall`, and address in the error message and the ModelBound output channel.
+- Added a 30s `AbortSignal` timeout and a single automatic retry on transient network errors (`ECONNRESET`, `ETIMEDOUT`, `EAI_AGAIN`, `ENETUNREACH`, `EHOSTUNREACH`, `UND_ERR_SOCKET`, etc.) so a brief blip no longer fails the pull/sync.
+
 ## [1.5.0] - 2026-05-24
 
 ### Added

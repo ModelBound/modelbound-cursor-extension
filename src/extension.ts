@@ -105,20 +105,84 @@ async function callMcpTool(
   name: string,
   args: Record<string, unknown>
 ): Promise<any> {
-  const res = await fetch(mcpUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method: 'tools/call',
-      params: { name, arguments: args },
-    }),
-  });
+  // `fetch failed` from undici is a generic wrapper that hides the real
+  // network cause (DNS, IPv6 happy-eyeballs, proxy, TLS, etc.).
+  // We unwrap `err.cause` and retry once on transient network failures so
+  // users get actionable errors instead of a bare "fetch failed".
+  const TRANSIENT = new Set([
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+  ]);
+
+  const describeNetworkError = (err: unknown): string => {
+    const e = err as any;
+    const cause = e?.cause ?? e;
+    const parts: string[] = [];
+    if (cause?.code) parts.push(`code=${cause.code}`);
+    if (cause?.errno) parts.push(`errno=${cause.errno}`);
+    if (cause?.syscall) parts.push(`syscall=${cause.syscall}`);
+    if (cause?.address) parts.push(`address=${cause.address}`);
+    if (cause?.port) parts.push(`port=${cause.port}`);
+    const msg = cause?.message || e?.message || String(err);
+    const detail = parts.length ? ` (${parts.join(', ')})` : '';
+    let host = mcpUrl;
+    try { host = new URL(mcpUrl).host; } catch { /* noop */ }
+    return `Network error contacting ${host}: ${msg}${detail}. Check internet/VPN/proxy and that ${host} is reachable.`;
+  };
+
+  const attempt = async (): Promise<Response> => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 30_000);
+    try {
+      return await fetch(mcpUrl, {
+        method: 'POST',
+        signal: ac.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'tools/call',
+          params: { name, arguments: args },
+        }),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let res: Response;
+  try {
+    res = await attempt();
+  } catch (err) {
+    const code = (err as any)?.cause?.code || (err as any)?.code;
+    if (code && TRANSIENT.has(code)) {
+      log(`MCP ${name}: transient ${code}, retrying once...`);
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        res = await attempt();
+      } catch (err2) {
+        const detailed = describeNetworkError(err2);
+        log(`MCP ${name} failed after retry: ${detailed}`);
+        throw new Error(detailed);
+      }
+    } else {
+      const detailed = describeNetworkError(err);
+      log(`MCP ${name} failed: ${detailed}`);
+      throw new Error(detailed);
+    }
+  }
+
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`MCP ${name} failed: ${res.status} ${body}`);
