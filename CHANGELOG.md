@@ -2,6 +2,18 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.6.0] - 2026-05-25
+
+### Added
+- **Browser-based sign-in (OAuth 2.0 Device Authorization Grant).** New `ModelBound: Sign In with Browser` command — no more copy/pasting API keys. On first activation the extension opens `modelbound.co/extension/connect?code=…` in your browser; you authenticate with GitHub, GitLab, Bitbucket, or email/password (creating a ModelBound account on the fly if needed), click Approve, and a scoped `mb_live_*` key is provisioned automatically and stored in VS Code config.
+- **`ModelBound: Sign Out`** command clears the stored API key.
+- New `modelbound.authUrl` setting for self-hosted / preview environments (defaults to the hosted ModelBound device-auth endpoint).
+
+### Changed
+- Activation onboarding now offers **Sign In with Browser** as the primary action, with **Paste API Key** kept as a manual fallback. The legacy `ModelBound: Set API Key` command is retitled `ModelBound: Set API Key (Manual)`.
+
+
+
 ## [1.5.2] - 2026-05-25
 
 ### Fixed

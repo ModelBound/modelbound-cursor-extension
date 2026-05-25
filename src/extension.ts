@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
+import { runSignIn } from './device-auth';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.{md,json}',
@@ -346,14 +347,30 @@ export async function activate(context: vscode.ExtensionContext) {
   const mcpUrl =
     config.get<string>('mcpUrl') || 'https://mcp.modelbound.co/mcp';
 
-  // 0. Onboarding: prompt for API key if missing
+  // 0. Onboarding: browser-based sign in (Device Authorization Grant).
+  // Falls back to manual API key entry for users who prefer that.
   if (!apiKey) {
     const action = await vscode.window.showInformationMessage(
-      'ModelBound: No API key configured. Would you like to set one now?',
-      'Enter API Key',
-      'Later'
+      'ModelBound: Sign in to start syncing your AI context, skills, and rules.',
+      'Sign In with Browser',
+      'Paste API Key',
+      'Later',
     );
-    if (action === 'Enter API Key') {
+    if (action === 'Sign In with Browser') {
+      try {
+        const email = await runSignIn();
+        apiKey = vscode.workspace.getConfiguration('modelbound').get<string>('apiKey');
+        vscode.window.showInformationMessage(
+          email
+            ? `ModelBound: Signed in as ${email}.`
+            : 'ModelBound: Signed in successfully.',
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`Sign-in failed: ${msg}`);
+        vscode.window.showErrorMessage(`ModelBound sign-in failed: ${msg}`);
+      }
+    } else if (action === 'Paste API Key') {
       const input = await vscode.window.showInputBox({
         prompt: 'Enter your ModelBound.co API Key',
         placeHolder: 'mb_live_...',
@@ -367,6 +384,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }
   }
+
 
   // 1. Ensure canonical .modelbound/ exists
   const localFolder = path.join(workspaceRoot, '.modelbound');
@@ -588,7 +606,30 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand);
+  // 6. Sign in / Sign out (Device Authorization Grant)
+  const signInCommand = vscode.commands.registerCommand('modelbound.signIn', async () => {
+    try {
+      const email = await runSignIn();
+      vscode.window.showInformationMessage(
+        email ? `ModelBound: Signed in as ${email}. Reload window to start syncing.` : 'ModelBound: Signed in. Reload window to start syncing.',
+        'Reload Window',
+      ).then((choice) => {
+        if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`Sign-in failed: ${msg}`);
+      vscode.window.showErrorMessage(`ModelBound sign-in failed: ${msg}`);
+    }
+  });
+
+  const signOutCommand = vscode.commands.registerCommand('modelbound.signOut', async () => {
+    const cfg = vscode.workspace.getConfiguration('modelbound');
+    await cfg.update('apiKey', '', vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage('ModelBound: Signed out. Reload window to stop syncing.');
+  });
+
+  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand);
 }
 
 export function deactivate() {

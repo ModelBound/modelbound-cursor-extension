@@ -3,7 +3,7 @@
   "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -55,17 +55,30 @@
           "type": "string",
           "default": "https://mcp.modelbound.co/mcp",
           "description": "ModelBound MCP Streamable HTTP endpoint."
+        },
+        "modelbound.authUrl": {
+          "type": "string",
+          "default": "https://qwqfoyhnhszqqplsavxk.supabase.co/functions/v1/extension-device-auth",
+          "description": "ModelBound device authorization endpoint (advanced — usually leave default)."
         }
       }
     },
     "commands": [
+      {
+        "command": "modelbound.signIn",
+        "title": "ModelBound: Sign In with Browser"
+      },
+      {
+        "command": "modelbound.signOut",
+        "title": "ModelBound: Sign Out"
+      },
       {
         "command": "modelbound.pullSkill",
         "title": "ModelBound: Pull Skill/Context to Local Workspace"
       },
       {
         "command": "modelbound.setApiKey",
-        "title": "ModelBound: Set API Key"
+        "title": "ModelBound: Set API Key (Manual)"
       },
       {
         "command": "modelbound.runSkillPipeline",
