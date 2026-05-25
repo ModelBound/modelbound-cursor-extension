@@ -409,7 +409,7 @@ export async function activate(context: vscode.ExtensionContext) {
       try {
         const content = fs.readFileSync(filePath, 'utf8');
         const { repoUrl, branch } = getRepoInfo(workspaceRoot);
-        await callMcpTool(mcpUrl, apiKey!, 'sync_skill_from_ide', {
+        await callMcpTool(mcpUrl, apiKey!, 'skills.syncFromIde', {
           repo_url: repoUrl,
           branch,
           ide,
@@ -464,7 +464,7 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       // Pass both `file_id` and `skill_id` for forward/backward compatibility
       // with the hosted MCP server's get_skill handler.
-      const data = await callMcpTool(mcpUrl, apiKey, 'get_skill', {
+      const data = await callMcpTool(mcpUrl, apiKey, 'skills.get', {
         file_id: skillId,
         skill_id: skillId,
       });
@@ -583,7 +583,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const TERMINAL = new Set(['passed', 'failed', 'completed', 'errored', 'skipped']);
     while (polling) {
       try {
-        const status = await callMcpTool(mcpUrl, apiKey, 'get_skill_pipeline_status', {
+        const status = await callMcpTool(mcpUrl, apiKey, 'skills.getPipelineStatus', {
           skill_id: skillId,
           limit: 1,
         });
