@@ -2,6 +2,13 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.6.1] - 2026-05-25
+
+### Changed
+- `ModelBound: Sign In with Browser` now detects an already-configured API key and asks for confirmation before re-signing in (which revokes the existing key server-side). Avoids accidentally minting and orphaning extra `mb_live_*` tokens.
+
+
+
 ## [1.6.0] - 2026-05-25
 
 ### Added

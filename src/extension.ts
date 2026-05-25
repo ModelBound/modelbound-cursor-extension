@@ -608,6 +608,19 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 6. Sign in / Sign out (Device Authorization Grant)
   const signInCommand = vscode.commands.registerCommand('modelbound.signIn', async () => {
+    // Avoid wastefully minting a new key when one is already configured.
+    // Re-signing in revokes the existing key server-side, so warn first.
+    const existing = vscode.workspace.getConfiguration('modelbound').get<string>('apiKey');
+    if (existing && existing.trim()) {
+      const masked = existing.slice(0, 12) + '…';
+      const choice = await vscode.window.showWarningMessage(
+        `ModelBound: You're already signed in (${masked}). Signing in again will revoke the existing key and issue a new one. Continue?`,
+        { modal: false },
+        'Sign In Again',
+        'Cancel',
+      );
+      if (choice !== 'Sign In Again') return;
+    }
     try {
       const email = await runSignIn();
       vscode.window.showInformationMessage(
