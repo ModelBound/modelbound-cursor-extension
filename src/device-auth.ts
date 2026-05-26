@@ -10,7 +10,7 @@
 import * as vscode from 'vscode';
 
 const DEFAULT_AUTH_BASE =
-  'https://qwqfoyhnhszqqplsavxk.supabase.co/functions/v1/extension-device-auth';
+  'https://modelbound.co/api/extension-device-auth';
 
 export interface DeviceStartResponse {
   device_code: string;
