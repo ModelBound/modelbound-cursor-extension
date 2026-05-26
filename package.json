@@ -53,7 +53,7 @@
         },
         "modelbound.mcpUrl": {
           "type": "string",
-          "default": "https://mcp.modelbound.co/mcp",
+          "default": "https://mcp.modelbound.co",
           "description": "ModelBound MCP Streamable HTTP endpoint."
         },
         "modelbound.authUrl": {
