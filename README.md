@@ -16,8 +16,21 @@ If you've ever dealt with:
 - No version history for your AI rules and context
 - Wanting an MCP prompt server that actually works with your IDE
 - No CI/CD pipeline for testing and validating prompt changes
+- Rebuilding your entire prompt library when switching AI tools
 
 This extension solves all of it.
+
+---
+
+## One Library, Every AI Tool
+
+Your prompts, rules, and skills shouldn't be locked into a single IDE or agent. ModelBound acts as the shared layer underneath — write a skill once, and it's available everywhere you work:
+
+- Switch from Cursor to Claude Code mid-project? Your context follows you.
+- Try a new AI tool next month? Your entire prompt library is already there.
+- Run Copilot at work and Cursor at home? Same skills, same quality, no re-work.
+
+Stop rebuilding context from scratch every time you change tools. ModelBound makes your investment in prompt engineering portable — so you get full value from every AI subscription you're paying for, regardless of which editor or agent you're using today.
 
 ---
 
@@ -122,6 +135,7 @@ The pipeline runs server-side via the ModelBound MCP server and reports results 
 
 - **Team prompt libraries:** Share system prompts and Cursor rules across your org. Everyone pulls from the same source of truth.
 - **Multi-IDE workflows:** Use Cursor and Claude Code on the same project? Edits in either sync back to ModelBound and propagate to both.
+- **Tool-agnostic prompt investment:** Build your skills once in ModelBound and use them across every AI tool you subscribe to — no vendor lock-in, no re-work when you switch.
 - **Prompt version control:** Track changes to your AI rules over time. See who changed what and roll back if needed.
 - **Skill CI/CD:** Validate prompt changes before publishing — run test gates, optimization passes, and production deploys from the command palette.
 - **MCP-native agents:** Let your AI agent fetch and scaffold context directly via the ModelBound MCP server — no manual file management.
