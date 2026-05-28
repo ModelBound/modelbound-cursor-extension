@@ -642,7 +642,119 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage('ModelBound: Signed out. Reload window to stop syncing.');
   });
 
-  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand);
+  // 7. Browse Resource Tree — visualise platform → folder → files using get_resource_tree.
+  const browseTreeCommand = vscode.commands.registerCommand('modelbound.browseResourceTree', async () => {
+    if (!apiKey) {
+      vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
+      return;
+    }
+    try {
+      const data = await callMcpTool(mcpUrl, apiKey, 'get_resource_tree', {});
+      const tree = normalizeTree(data);
+      const platforms = Object.keys(tree).sort();
+      if (platforms.length === 0) {
+        vscode.window.showInformationMessage('ModelBound: No resources found yet. Push a skill or rule first.');
+        return;
+      }
+      // Two-step quick-pick: pick a platform, then a file, then preview via get_skill.
+      const platform = await vscode.window.showQuickPick(platforms, { placeHolder: 'Pick a platform' });
+      if (!platform) return;
+      const roots = tree[platform];
+      const items: vscode.QuickPickItem[] = [];
+      for (const root of Object.keys(roots).sort()) {
+        for (const file of roots[root]) {
+          const label = file.path || file.name || file.id || '(unnamed)';
+          items.push({
+            label,
+            description: file.ai_type ? `[${file.ai_type}]` : undefined,
+            detail: `${root}${file.id ? `  ·  ${file.id}` : ''}`,
+          });
+        }
+      }
+      if (items.length === 0) {
+        vscode.window.showInformationMessage(`ModelBound: No files under ${platform}.`);
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: `${platform} — pick a file to preview` });
+      if (!picked) return;
+      const skillId = (picked.detail?.split('·').pop() ?? '').trim() || picked.label;
+      try {
+        const skill = await callMcpTool(mcpUrl, apiKey, 'get_skill', { skill_id: skillId, file_id: skillId });
+        const body: string =
+          (skill && typeof skill === 'object' && 'text' in skill && typeof (skill as any).text === 'string'
+            ? (skill as any).text
+            : typeof skill === 'string' ? skill : JSON.stringify(skill, null, 2)) || '';
+        const doc = await vscode.workspace.openTextDocument({ content: body, language: 'markdown' });
+        await vscode.window.showTextDocument(doc, { preview: true });
+      } catch (err) {
+        vscode.window.showErrorMessage(`ModelBound preview failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage(`ModelBound resource tree failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // 8. Filter Skills — quick-pick source_platform then ai_type, then list_skills with filters.
+  const filterSkillsCommand = vscode.commands.registerCommand('modelbound.filterSkills', async () => {
+    if (!apiKey) {
+      vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
+      return;
+    }
+    const PLATFORMS = ['(any)', 'claude-code', 'cursor', 'kiro', 'amazon-q', 'copilot', 'windsurf', 'codex', 'modelbound'];
+    const TYPES = ['(any)', 'skill', 'hook', 'steering', 'system-prompt', 'rule', 'agent', 'memory', 'spec', 'instructions', 'prompt'];
+    const platform = await vscode.window.showQuickPick(PLATFORMS, { placeHolder: 'Filter by source_platform' });
+    if (!platform) return;
+    const aiType = await vscode.window.showQuickPick(TYPES, { placeHolder: 'Filter by ai_type' });
+    if (!aiType) return;
+    const args: Record<string, string> = {};
+    if (platform !== '(any)') args.source_platform = platform;
+    if (aiType !== '(any)') args.ai_type = aiType;
+    try {
+      const data = await callMcpTool(mcpUrl, apiKey, 'list_skills', args);
+      const rows: any[] = (data && (data as any).skills) || (data && (data as any).items) || [];
+      if (rows.length === 0) {
+        vscode.window.showInformationMessage('ModelBound: No skills matched those filters.');
+        return;
+      }
+      const items: vscode.QuickPickItem[] = rows.map((r) => ({
+        label: r.name || r.slug || r.id || '(unnamed)',
+        description: [r.ai_type, r.source_platform].filter(Boolean).map((s) => `[${s}]`).join(' '),
+        detail: [r.repo, r.source_path].filter(Boolean).join(' · ') || undefined,
+      }));
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: `${rows.length} skill(s) — pick to preview` });
+      if (!picked) return;
+      const id = rows.find((r) => (r.name || r.slug || r.id) === picked.label)?.id ?? picked.label;
+      const skill = await callMcpTool(mcpUrl, apiKey, 'get_skill', { skill_id: id, file_id: id });
+      const body: string =
+        (skill && typeof skill === 'object' && 'text' in skill && typeof (skill as any).text === 'string'
+          ? (skill as any).text
+          : typeof skill === 'string' ? skill : JSON.stringify(skill, null, 2)) || '';
+      const doc = await vscode.workspace.openTextDocument({ content: body, language: 'markdown' });
+      await vscode.window.showTextDocument(doc, { preview: true });
+    } catch (err) {
+      vscode.window.showErrorMessage(`ModelBound filter skills failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand);
+}
+
+// Normalise the various shapes get_resource_tree may return into
+// `{ platform: { rootDir: [{ id, path, ai_type, name }] } }`.
+function normalizeTree(data: any): Record<string, Record<string, Array<{ id?: string; path?: string; name?: string; ai_type?: string }>>> {
+  if (!data || typeof data !== 'object') return {};
+  const src = data.platforms ?? data.tree ?? data;
+  const out: Record<string, Record<string, any[]>> = {};
+  for (const [platform, roots] of Object.entries(src)) {
+    if (!roots || typeof roots !== 'object') continue;
+    out[platform] = {};
+    for (const [root, val] of Object.entries(roots as Record<string, unknown>)) {
+      if (Array.isArray(val)) out[platform][root] = val;
+      else if (val && typeof val === 'object' && Array.isArray((val as any).files)) out[platform][root] = (val as any).files;
+      else out[platform][root] = [];
+    }
+  }
+  return out;
 }
 
 export function deactivate() {

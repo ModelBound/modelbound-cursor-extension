@@ -2,6 +2,12 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## 1.7.0
+
+- New command **ModelBound: Browse Resource Tree** — pick a platform → file from the team's full AI hierarchy (`get_resource_tree`) and preview the contents via `get_skill`.
+- New command **ModelBound: Filter Skills…** — quick-pick `source_platform` and `ai_type`, then call `list_skills` with those filters and preview the picked skill.
+
+
 ## [1.6.1] - 2026-05-25
 
 ### Changed
