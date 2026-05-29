@@ -35,6 +35,62 @@ const recentLocalPushes = new Map<string, number>();
 const inFlightPathSyncs = new Set<string>();
 const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// Persistent registry of skills this workspace has touched (pushed or pulled).
+// Key: skill UUID. Value: { slug, paths: absolute file paths }.
+// Used by the realtime watcher to decide whether an MB-side change should
+// land on disk. Without this, MB→IDE pulls get filtered out whenever the
+// local filename doesn't follow `<slug>.md` exactly.
+type SkillRegistryEntry = { slug?: string | null; paths: string[] };
+const REGISTRY_KEY = 'modelbound.skillRegistry.v1';
+let skillRegistry: Record<string, SkillRegistryEntry> = {};
+let extensionContext: vscode.ExtensionContext | null = null;
+
+function loadRegistry(ctx: vscode.ExtensionContext): void {
+  extensionContext = ctx;
+  skillRegistry = ctx.workspaceState.get<Record<string, SkillRegistryEntry>>(REGISTRY_KEY, {}) ?? {};
+}
+
+function saveRegistry(): void {
+  if (!extensionContext) return;
+  void extensionContext.workspaceState.update(REGISTRY_KEY, skillRegistry);
+}
+
+function registerSkill(skillId: string | null | undefined, slug: string | null | undefined, filePath?: string | null): void {
+  if (!skillId) return;
+  const entry = skillRegistry[skillId] ?? { slug: slug ?? null, paths: [] };
+  if (slug && !entry.slug) entry.slug = slug;
+  if (filePath) {
+    const abs = path.resolve(filePath);
+    if (!entry.paths.includes(abs)) entry.paths.push(abs);
+  }
+  skillRegistry[skillId] = entry;
+  // Also alias by slug for lookups that only know the slug.
+  if (slug && slug !== skillId) {
+    const slugEntry = skillRegistry[slug] ?? { slug, paths: [] };
+    for (const p of entry.paths) if (!slugEntry.paths.includes(p)) slugEntry.paths.push(p);
+    skillRegistry[slug] = slugEntry;
+  }
+  saveRegistry();
+}
+
+function lookupRegistry(skillId: string | null | undefined, slug: string | null | undefined): SkillRegistryEntry | null {
+  for (const key of [skillId, slug]) {
+    if (key && skillRegistry[key]) {
+      const entry = skillRegistry[key];
+      // Drop stale paths
+      const live = entry.paths.filter((p) => {
+        try { return fs.existsSync(p); } catch { return false; }
+      });
+      if (live.length !== entry.paths.length) {
+        entry.paths = live;
+        saveRegistry();
+      }
+      if (live.length > 0) return entry;
+    }
+  }
+  return null;
+}
+
 function log(msg: string): void {
   if (!outputChannel) outputChannel = vscode.window.createOutputChannel('ModelBound');
   outputChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
@@ -429,6 +485,7 @@ function pipelineHtml(skillId: string): string {
 }
 
 export async function activate(context: vscode.ExtensionContext) {
+  loadRegistry(context);
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) return;
   const workspaceRoot = workspaceFolder.uri.fsPath;
@@ -533,8 +590,11 @@ export async function activate(context: vscode.ExtensionContext) {
             body_md: content,
           },
         });
-        markLocalPush(syncResult?.skill_id || skillId);
-        log(`Synced ${relativePath} (repo=${repoUrl ?? 'none'})`);
+        const returnedId = (syncResult as any)?.skill_id || skillId;
+        const returnedSlug = (syncResult as any)?.slug || skillId;
+        markLocalPush(returnedId);
+        registerSkill(returnedId, returnedSlug, filePath);
+        log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} (repo=${repoUrl ?? 'none'})`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -593,6 +653,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // location. Used by both the manual pull command and the realtime watcher.
   const pullSkillToDisk = async (skillId: string): Promise<{ paths: string[] }> => {
     if (!apiKey) throw new Error('Not signed in.');
+    log(`Pulling skill ${skillId} from ModelBound…`);
     const data = await callMcpTool(mcpUrl, apiKey, 'skills.get', {
       file_id: skillId,
       skill_id: skillId,
@@ -605,7 +666,12 @@ export async function activate(context: vscode.ExtensionContext) {
           : '') || '';
     if (!content) throw new Error('Skill not found or empty');
 
-    const outputPaths = getSkillOutputPaths(workspaceRoot, skillId);
+    const returnedSlug = data && typeof data === 'object' ? (data as any).slug ?? null : null;
+    const returnedId = data && typeof data === 'object' ? (data as any).skill_id ?? (data as any).id ?? skillId : skillId;
+
+    const registryEntry = lookupRegistry(returnedId, returnedSlug) || lookupRegistry(skillId, null);
+    const outputPaths: string[] = registryEntry ? [...registryEntry.paths] : getSkillOutputPaths(workspaceRoot, returnedSlug || skillId);
+
     const sourcePath = data && typeof data === 'object' ? (data as any).source_path : null;
     if (typeof sourcePath === 'string' && isSafeRelativePath(sourcePath)) {
       const sourceAbs = path.join(workspaceRoot, sourcePath);
@@ -617,7 +683,9 @@ export async function activate(context: vscode.ExtensionContext) {
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
       markSelfWrite(destPath);
       fs.writeFileSync(destPath, content, 'utf8');
+      registerSkill(returnedId, returnedSlug, destPath);
     }
+    log(`Pulled ${returnedId} → ${outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ')}`);
     return { paths: outputPaths };
   };
 
@@ -638,15 +706,20 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // 3b. Realtime push — subscribe to Supabase Realtime so cloud edits land
-  // in this workspace automatically (only for skills we already mirror).
+  // 3b. Realtime push — subscribe to Supabase Realtime so cloud edits land in
+  // this workspace automatically.
   if (apiKey && autoSync) {
+    log(`Starting realtime subscription (registered skills: ${Object.keys(skillRegistry).length})`);
     const realtime = new RealtimeSync({
       apiKey,
       workspaceRoot,
       log,
       shouldSkipPull: (skillId, row) => shouldSuppressRecentLocalPush(skillId, row),
       hasLocalCopy: (slug, skillId) => {
+        if (lookupRegistry(skillId, slug ?? null)) {
+          log(`Realtime: ${slug ?? skillId} matched registry — will pull.`);
+          return true;
+        }
         const candidates = [slug, skillId].filter(Boolean) as string[];
         for (const id of candidates) {
           const probes = [
@@ -659,8 +732,12 @@ export async function activate(context: vscode.ExtensionContext) {
             path.join(workspaceRoot, '.claude', 'skills', id, 'SKILL.md'),
             path.join(workspaceRoot, '.agents', 'skills', id, 'SKILL.md'),
           ];
-          if (probes.some((p) => fs.existsSync(p))) return true;
+          if (probes.some((p) => fs.existsSync(p))) {
+            log(`Realtime: ${id} matched probe — will pull.`);
+            return true;
+          }
         }
+        log(`Realtime: skill ${slug ?? skillId} has no local copy in this workspace — ignoring event.`);
         return false;
       },
       pullSkillToDisk: async (skillId) => {
