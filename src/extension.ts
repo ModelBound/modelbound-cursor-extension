@@ -7,15 +7,30 @@ import { ensureUsableApiKey } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
 
 const WATCH_GLOBS = [
-  '.modelbound/**/*.{md,json}',
+  '.modelbound/**/*.md',
+  '.modelbound/**/*.json',
   '.kiro/skills/**/*.md',
   '.cursor/rules/**/*.md',
+  '.cursor/rules/**/*.mdc',
   '.claude/**/*.md',
+  '.modelbound/skills/**/*.md',
   '.agents/skills/**/SKILL.md',
 ];
 
+const WATCH_ROOTS = [
+  '.modelbound/',
+  '.kiro/skills/',
+  '.cursor/rules/',
+  '.claude/',
+];
+
+const SELF_WRITE_SUPPRESS_MS = 1500;
+const DEBOUNCE_MS = 800;
+
 const watchers: vscode.FileSystemWatcher[] = [];
 let outputChannel: vscode.OutputChannel | undefined;
+const recentSelfWrites = new Map<string, number>();
+const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function log(msg: string): void {
   if (!outputChannel) outputChannel = vscode.window.createOutputChannel('ModelBound');
@@ -92,6 +107,52 @@ function detectIde(): string {
 
 function relPath(workspaceRoot: string, fsPath: string): string {
   return path.relative(workspaceRoot, fsPath).split(path.sep).join('/');
+}
+
+
+function isWatchablePath(workspaceRoot: string, fsPath: string): boolean {
+  const rel = relPath(workspaceRoot, fsPath);
+  if (!rel || rel.startsWith('..')) return false;
+  if (!rel.endsWith('.md') && !rel.endsWith('.mdc') && !rel.endsWith('.json')) return false;
+  return WATCH_ROOTS.some((root) => rel === root.replace(/\/$/, '') || rel.startsWith(root));
+}
+
+
+function isSafeRelativePath(rel: string): boolean {
+  if (!rel || path.isAbsolute(rel)) return false;
+  const normalized = rel.split(path.sep).join('/');
+  return !normalized.split('/').includes('..');
+}
+
+function sourceIdeFromPath(workspaceRoot: string, fsPath: string, fallback: string): string {
+  const rel = relPath(workspaceRoot, fsPath);
+  if (rel.startsWith('.cursor/')) return 'cursor';
+  if (rel.startsWith('.kiro/')) return 'kiro';
+  if (rel.startsWith('.claude/')) return 'claude';
+  if (rel.startsWith('.modelbound/')) return 'modelbound';
+  return fallback;
+}
+
+function markSelfWrite(fsPath: string): void {
+  recentSelfWrites.set(path.resolve(fsPath), Date.now());
+}
+
+function shouldSuppressSelfWrite(fsPath: string): boolean {
+  const key = path.resolve(fsPath);
+  const ts = recentSelfWrites.get(key);
+  if (!ts) return false;
+  if (Date.now() - ts <= SELF_WRITE_SUPPRESS_MS) return true;
+  recentSelfWrites.delete(key);
+  return false;
+}
+
+function scheduleDebounced(key: string, fn: () => void): void {
+  const existing = pendingSyncTimers.get(key);
+  if (existing) clearTimeout(existing);
+  pendingSyncTimers.set(key, setTimeout(() => {
+    pendingSyncTimers.delete(key);
+    fn();
+  }, DEBOUNCE_MS));
 }
 
 /**
@@ -345,7 +406,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const config = vscode.workspace.getConfiguration('modelbound');
   let apiKey = config.get<string>('apiKey');
-  const autoSync = config.get<boolean>('autoSync');
+  const autoSync = config.get<boolean>('autoSync', true);
   const mcpUrl =
     config.get<string>('mcpUrl') || 'https://mcp.modelbound.co/mcp';
 
@@ -414,22 +475,30 @@ export async function activate(context: vscode.ExtensionContext) {
       );
     }
 
-    const syncFile = async (uri: vscode.Uri) => {
+    const syncFileNow = async (uri: vscode.Uri) => {
       const filePath = uri.fsPath;
-      if (!filePath.endsWith('.md') && !filePath.endsWith('.json')) return;
+      if (!isWatchablePath(workspaceRoot, filePath)) return;
+      if (shouldSuppressSelfWrite(filePath)) {
+        log(`Skipped self-originated sync for ${relPath(workspaceRoot, filePath)}`);
+        return;
+      }
       const skillId = path.basename(filePath, path.extname(filePath));
       vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
       try {
         const content = fs.readFileSync(filePath, 'utf8');
         const { repoUrl, branch } = getRepoInfo(workspaceRoot);
-        await callMcpTool(mcpUrl, apiKey!, 'skills.syncFromIde', {
-          repo_url: repoUrl,
-          branch,
-          ide,
-          relative_path: relPath(workspaceRoot, filePath),
-          content,
+        const relativePath = relPath(workspaceRoot, filePath);
+        await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+          tool_name: 'skills.syncFromIde',
+          arguments: {
+            repo_url: repoUrl,
+            branch,
+            source_ide: sourceIdeFromPath(workspaceRoot, filePath, ide),
+            source_path: relativePath,
+            body_md: content,
+          },
         });
-        log(`Synced ${skillId} (repo=${repoUrl ?? 'none'})`);
+        log(`Synced ${relativePath} (repo=${repoUrl ?? 'none'})`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -438,14 +507,25 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     };
 
+    const syncFile = (uri: vscode.Uri) => {
+      const filePath = uri.fsPath;
+      if (!isWatchablePath(workspaceRoot, filePath)) return;
+      scheduleDebounced(`sync:${path.resolve(filePath)}`, () => {
+        syncFileNow(uri).catch((err) => log(`Unhandled sync error: ${(err as Error).message ?? String(err)}`));
+      });
+    };
+
     const deleteFile = async (uri: vscode.Uri) => {
       const filePath = uri.fsPath;
       const skillId = path.basename(filePath, path.extname(filePath));
       try {
         const { repoUrl } = getRepoInfo(workspaceRoot);
-        await callMcpTool(mcpUrl, apiKey!, 'delete_skill_from_ide', {
-          repo_url: repoUrl,
-          relative_path: relPath(workspaceRoot, filePath),
+        await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+          tool_name: 'skills.deleteFromIde',
+          arguments: {
+            repo_url: repoUrl,
+            source_path: relPath(workspaceRoot, filePath),
+          },
         });
         vscode.window.setStatusBarMessage(`$(trash) ModelBound: Removed ${skillId}`, 3000);
       } catch (err) {
@@ -464,6 +544,11 @@ export async function activate(context: vscode.ExtensionContext) {
       watchers.push(watcher);
       context.subscriptions.push(watcher);
     }
+
+    const saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme === 'file') syncFile(doc.uri);
+    });
+    context.subscriptions.push(saveListener);
   }
 
   // Reusable: fetch a skill from MCP and write it to every relevant local
@@ -483,7 +568,16 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!content) throw new Error('Skill not found or empty');
 
     const outputPaths = getSkillOutputPaths(workspaceRoot, skillId);
+    const sourcePath = data && typeof data === 'object' ? (data as any).source_path : null;
+    if (typeof sourcePath === 'string' && isSafeRelativePath(sourcePath)) {
+      const sourceAbs = path.join(workspaceRoot, sourcePath);
+      if (isWatchablePath(workspaceRoot, sourceAbs) && !outputPaths.includes(sourceAbs)) {
+        outputPaths.unshift(sourceAbs);
+      }
+    }
     for (const destPath of outputPaths) {
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      markSelfWrite(destPath);
       fs.writeFileSync(destPath, content, 'utf8');
     }
     return { paths: outputPaths };
@@ -519,8 +613,11 @@ export async function activate(context: vscode.ExtensionContext) {
           const probes = [
             path.join(workspaceRoot, '.modelbound', `${id}.md`),
             path.join(workspaceRoot, '.kiro', 'skills', `${id}.md`),
+            path.join(workspaceRoot, '.kiro', 'skills', id, 'SKILL.md'),
             path.join(workspaceRoot, '.cursor', 'rules', `${id}.md`),
+            path.join(workspaceRoot, '.cursor', 'rules', `${id}.mdc`),
             path.join(workspaceRoot, '.claude', `${id}.md`),
+            path.join(workspaceRoot, '.claude', 'skills', id, 'SKILL.md'),
             path.join(workspaceRoot, '.agents', 'skills', id, 'SKILL.md'),
           ];
           if (probes.some((p) => fs.existsSync(p))) return true;
@@ -805,5 +902,7 @@ function normalizeTree(data: any): Record<string, Record<string, Array<{ id?: st
 }
 
 export function deactivate() {
+  for (const timer of pendingSyncTimers.values()) clearTimeout(timer);
+  pendingSyncTimers.clear();
   for (const w of watchers) w.dispose();
 }

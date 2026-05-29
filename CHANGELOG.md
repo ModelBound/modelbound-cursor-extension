@@ -2,6 +2,13 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.8.1] - 2026-05-29
+
+### Fixed
+- Auto-sync now watches `.kiro/skills/`, `.cursor/rules/` including `.mdc`, `.claude/`, and `.modelbound/` on create, save, edit, and delete.
+- Local edits now call `modelbound.callTool` → `skills.syncFromIde`, matching the MCP meta-tool path used by IDE integrations.
+- Cloud-to-IDE pulls now write back to the skill's original watched source path when available, while suppressing self-triggered watcher loops.
+
 ## 1.7.0
 
 - New command **ModelBound: Browse Resource Tree** — pick a platform → file from the team's full AI hierarchy (`get_resource_tree`) and preview the contents via `get_skill`.

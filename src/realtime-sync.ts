@@ -18,6 +18,7 @@ interface TokenResponse {
   expires_at: number; // unix seconds
   expires_in: number;
   supabase_url: string;
+  supabase_anon_key?: string;
   user_id: string;
   team_id: string;
   user_email?: string | null;
@@ -110,8 +111,9 @@ export class RealtimeSync {
     if (this.channel) { try { this.channel.unsubscribe(); } catch { /* noop */ } this.channel = null; }
     if (this.client) { try { this.client.removeAllChannels(); } catch { /* noop */ } this.client = null; }
 
-    this.client = createClient(tok.supabase_url, tok.token, {
+    this.client = createClient(tok.supabase_url, tok.supabase_anon_key || tok.token, {
       auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: `Bearer ${tok.token}` } },
       realtime: { params: { eventsPerSecond: 10 } },
     });
     // Some supabase-js versions need realtime.setAuth() to attach the JWT.
