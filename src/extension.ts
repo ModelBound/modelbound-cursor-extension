@@ -580,21 +580,78 @@ export async function activate(context: vscode.ExtensionContext) {
         const content = fs.readFileSync(filePath, 'utf8');
         const { repoUrl, branch } = getRepoInfo(workspaceRoot);
         const relativePath = relPath(workspaceRoot, filePath);
+        const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
         const syncResult = await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
           tool_name: 'skills.syncFromIde',
           arguments: {
             repo_url: repoUrl,
             branch,
-            source_ide: sourceIdeFromPath(workspaceRoot, filePath, ide),
+            source_ide: sourceIdeName,
             source_path: relativePath,
             body_md: content,
           },
         });
+
+        // Server returns a JSON-encoded action payload. Handle conflict locally
+        // by offering the user an in-IDE force-resolve, rather than just dying.
+        if ((syncResult as any)?.action === 'conflict') {
+          const conflictSkillId = (syncResult as any)?.skill_id as string | undefined;
+          registerSkill(conflictSkillId, null, filePath);
+          log(`Conflict for ${relativePath}: ${(syncResult as any).message ?? 'ModelBound has unsynced edits.'}`);
+          const pick = await vscode.window.showWarningMessage(
+            `ModelBound: "${skillId}" has unsynced edits on ModelBound. Choose how to resolve.`,
+            { modal: false },
+            'Keep my IDE version',
+            'Use ModelBound version',
+            'Open in ModelBound',
+          );
+          if (pick === 'Keep my IDE version' && conflictSkillId) {
+            try {
+              await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+                tool_name: 'skills.resolveConflict',
+                arguments: {
+                  skill_id: conflictSkillId,
+                  resolution: 'keep_ide',
+                  body_md: content,
+                  source_ide: sourceIdeName,
+                },
+              });
+              markLocalPush(conflictSkillId);
+              vscode.window.setStatusBarMessage(`$(check) ModelBound: Overwrote MB with IDE version`, 3000);
+              log(`Force-resolved ${relativePath} → kept IDE version.`);
+            } catch (e) {
+              const m = e instanceof Error ? e.message : String(e);
+              vscode.window.showErrorMessage(`Failed to force-resolve: ${m}`);
+            }
+          } else if (pick === 'Use ModelBound version' && conflictSkillId) {
+            try {
+              await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+                tool_name: 'skills.resolveConflict',
+                arguments: {
+                  skill_id: conflictSkillId,
+                  resolution: 'keep_modelbound',
+                  source_ide: sourceIdeName,
+                },
+              });
+              // Pull the resolved (MB) content down immediately so the on-disk
+              // file matches without waiting on realtime.
+              await pullSkillToDisk(conflictSkillId);
+              vscode.window.setStatusBarMessage(`$(check) ModelBound: Pulled MB version`, 3000);
+            } catch (e) {
+              const m = e instanceof Error ? e.message : String(e);
+              vscode.window.showErrorMessage(`Failed to pull MB version: ${m}`);
+            }
+          } else if (pick === 'Open in ModelBound' && conflictSkillId) {
+            vscode.env.openExternal(vscode.Uri.parse(`https://modelbound.co/skills/${conflictSkillId}`));
+          }
+          return;
+        }
+
         const returnedId = (syncResult as any)?.skill_id || skillId;
         const returnedSlug = (syncResult as any)?.slug || skillId;
         markLocalPush(returnedId);
         registerSkill(returnedId, returnedSlug, filePath);
-        log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} (repo=${repoUrl ?? 'none'})`);
+        log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} action=${(syncResult as any)?.action ?? 'updated'}`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
