@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
 import { runSignIn } from './device-auth';
+import { ensureUsableApiKey } from './auth-validate';
+import { RealtimeSync } from './realtime-sync';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.{md,json}',
@@ -347,9 +349,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const mcpUrl =
     config.get<string>('mcpUrl') || 'https://mcp.modelbound.co/mcp';
 
-  // 0. Onboarding: browser-based sign in (Device Authorization Grant).
-  // Falls back to manual API key entry for users who prefer that.
-  if (!apiKey) {
+  // 0. Onboarding: validate any stored API key before prompting. Avoids
+  // re-prompting users on every reload when a valid key is already saved.
+  const promptSignIn = async (): Promise<string | undefined> => {
     const action = await vscode.window.showInformationMessage(
       'ModelBound: Sign in to start syncing your AI context, skills, and rules.',
       'Sign In with Browser',
@@ -359,16 +361,16 @@ export async function activate(context: vscode.ExtensionContext) {
     if (action === 'Sign In with Browser') {
       try {
         const email = await runSignIn();
-        apiKey = vscode.workspace.getConfiguration('modelbound').get<string>('apiKey');
+        const fresh = vscode.workspace.getConfiguration('modelbound').get<string>('apiKey');
         vscode.window.showInformationMessage(
-          email
-            ? `ModelBound: Signed in as ${email}.`
-            : 'ModelBound: Signed in successfully.',
+          email ? `ModelBound: Signed in as ${email}.` : 'ModelBound: Signed in successfully.',
         );
+        return fresh;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log(`Sign-in failed: ${msg}`);
         vscode.window.showErrorMessage(`ModelBound sign-in failed: ${msg}`);
+        return undefined;
       }
     } else if (action === 'Paste API Key') {
       const input = await vscode.window.showInputBox({
@@ -379,11 +381,22 @@ export async function activate(context: vscode.ExtensionContext) {
       });
       if (input) {
         await config.update('apiKey', input, vscode.ConfigurationTarget.Global);
-        apiKey = input;
         vscode.window.showInformationMessage('ModelBound: API key saved.');
+        return input;
       }
     }
-  }
+    return undefined;
+  };
+
+  apiKey = await ensureUsableApiKey({
+    mcpUrl,
+    storedKey: apiKey,
+    log,
+    clearStoredKey: async () => {
+      await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
+    },
+    promptSignIn,
+  });
 
 
   // 1. Ensure canonical .modelbound/ exists
@@ -453,6 +466,29 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   }
 
+  // Reusable: fetch a skill from MCP and write it to every relevant local
+  // location. Used by both the manual pull command and the realtime watcher.
+  const pullSkillToDisk = async (skillId: string): Promise<{ paths: string[] }> => {
+    if (!apiKey) throw new Error('Not signed in.');
+    const data = await callMcpTool(mcpUrl, apiKey, 'skills.get', {
+      file_id: skillId,
+      skill_id: skillId,
+    });
+    const content: string =
+      (data && typeof data === 'object' && 'text' in data && typeof (data as any).text === 'string'
+        ? (data as any).text
+        : typeof data === 'string'
+          ? data
+          : '') || '';
+    if (!content) throw new Error('Skill not found or empty');
+
+    const outputPaths = getSkillOutputPaths(workspaceRoot, skillId);
+    for (const destPath of outputPaths) {
+      fs.writeFileSync(destPath, content, 'utf8');
+    }
+    return { paths: outputPaths };
+  };
+
   // 3. Manual pull command — routes through MCP `get_skill` so usage is tracked
   // server-side (powers per-skill invocation_count / last_invoked_at metrics).
   const pullCommand = vscode.commands.registerCommand('modelbound.pullSkill', async () => {
@@ -460,26 +496,8 @@ export async function activate(context: vscode.ExtensionContext) {
       prompt: 'Enter ModelBound Skill ID',
     });
     if (!skillId || !apiKey) return;
-
     try {
-      // Pass both `file_id` and `skill_id` for forward/backward compatibility
-      // with the hosted MCP server's get_skill handler.
-      const data = await callMcpTool(mcpUrl, apiKey, 'skills.get', {
-        file_id: skillId,
-        skill_id: skillId,
-      });
-      const content: string =
-        (data && typeof data === 'object' && 'text' in data && typeof (data as any).text === 'string'
-          ? (data as any).text
-          : typeof data === 'string'
-            ? data
-            : '') || '';
-      if (!content) throw new Error('Skill not found or empty');
-
-      const outputPaths = getSkillOutputPaths(workspaceRoot, skillId);
-      for (const destPath of outputPaths) {
-        fs.writeFileSync(destPath, content, 'utf8');
-      }
+      const { paths: outputPaths } = await pullSkillToDisk(skillId);
       const locations = outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ');
       vscode.window.showInformationMessage(`Pulled ${skillId} → ${locations}`);
     } catch (err) {
@@ -487,6 +505,35 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.window.showErrorMessage(`Failed to pull context: ${msg}`);
     }
   });
+
+  // 3b. Realtime push — subscribe to Supabase Realtime so cloud edits land
+  // in this workspace automatically (only for skills we already mirror).
+  if (apiKey && autoSync) {
+    const realtime = new RealtimeSync({
+      apiKey,
+      workspaceRoot,
+      log,
+      hasLocalCopy: (slug, skillId) => {
+        const candidates = [slug, skillId].filter(Boolean) as string[];
+        for (const id of candidates) {
+          const probes = [
+            path.join(workspaceRoot, '.modelbound', `${id}.md`),
+            path.join(workspaceRoot, '.kiro', 'skills', `${id}.md`),
+            path.join(workspaceRoot, '.cursor', 'rules', `${id}.md`),
+            path.join(workspaceRoot, '.claude', `${id}.md`),
+            path.join(workspaceRoot, '.agents', 'skills', id, 'SKILL.md'),
+          ];
+          if (probes.some((p) => fs.existsSync(p))) return true;
+        }
+        return false;
+      },
+      pullSkillToDisk: async (skillId) => {
+        await pullSkillToDisk(skillId);
+      },
+    });
+    realtime.start();
+    context.subscriptions.push({ dispose: () => realtime.stop() });
+  }
 
   // 4. Set/Update API Key
   const setKeyCommand = vscode.commands.registerCommand('modelbound.setApiKey', async () => {
