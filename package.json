@@ -100,7 +100,7 @@
     "watch": "tsc -watch -p ./"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0"
+    "@supabase/supabase-js": "^2.106.2"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
