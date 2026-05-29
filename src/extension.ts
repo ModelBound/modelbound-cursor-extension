@@ -24,12 +24,15 @@ const WATCH_ROOTS = [
   '.claude/',
 ];
 
-const SELF_WRITE_SUPPRESS_MS = 1500;
-const DEBOUNCE_MS = 800;
+const SELF_WRITE_SUPPRESS_MS = 30_000;
+const RECENT_LOCAL_PUSH_SUPPRESS_MS = 45_000;
+const DEBOUNCE_MS = 1200;
 
 const watchers: vscode.FileSystemWatcher[] = [];
 let outputChannel: vscode.OutputChannel | undefined;
 const recentSelfWrites = new Map<string, number>();
+const recentLocalPushes = new Map<string, number>();
+const inFlightPathSyncs = new Set<string>();
 const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function log(msg: string): void {
@@ -141,8 +144,34 @@ function shouldSuppressSelfWrite(fsPath: string): boolean {
   const key = path.resolve(fsPath);
   const ts = recentSelfWrites.get(key);
   if (!ts) return false;
-  if (Date.now() - ts <= SELF_WRITE_SUPPRESS_MS) return true;
+  if (Date.now() - ts <= SELF_WRITE_SUPPRESS_MS) {
+    recentSelfWrites.delete(key);
+    return true;
+  }
   recentSelfWrites.delete(key);
+  return false;
+}
+
+function markLocalPush(skillId: string | null | undefined): void {
+  if (!skillId) return;
+  recentLocalPushes.set(skillId, Date.now());
+}
+
+function shouldSuppressRecentLocalPush(skillId: string | null | undefined, row?: { updated_at?: string | null; last_ide_sync_at?: string | null }): boolean {
+  if (!skillId) return false;
+  const ts = recentLocalPushes.get(skillId);
+  if (!ts) return false;
+  if (Date.now() - ts > RECENT_LOCAL_PUSH_SUPPRESS_MS) {
+    recentLocalPushes.delete(skillId);
+    return false;
+  }
+
+  const updatedAt = row?.updated_at ? new Date(row.updated_at).getTime() : 0;
+  const lastIdeSyncAt = row?.last_ide_sync_at ? new Date(row.last_ide_sync_at).getTime() : 0;
+  if (!updatedAt || !lastIdeSyncAt) return false;
+
+  const isIdeEcho = Math.abs(updatedAt - lastIdeSyncAt) <= 5000 && lastIdeSyncAt >= ts - 15000;
+  if (isIdeEcho) return true;
   return false;
 }
 
@@ -482,13 +511,19 @@ export async function activate(context: vscode.ExtensionContext) {
         log(`Skipped self-originated sync for ${relPath(workspaceRoot, filePath)}`);
         return;
       }
+      const pathKey = path.resolve(filePath);
+      if (inFlightPathSyncs.has(pathKey)) {
+        log(`Skipped already-running sync for ${relPath(workspaceRoot, filePath)}`);
+        return;
+      }
       const skillId = path.basename(filePath, path.extname(filePath));
+      inFlightPathSyncs.add(pathKey);
       vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
       try {
         const content = fs.readFileSync(filePath, 'utf8');
         const { repoUrl, branch } = getRepoInfo(workspaceRoot);
         const relativePath = relPath(workspaceRoot, filePath);
-        await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+        const syncResult = await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
           tool_name: 'skills.syncFromIde',
           arguments: {
             repo_url: repoUrl,
@@ -498,12 +533,15 @@ export async function activate(context: vscode.ExtensionContext) {
             body_md: content,
           },
         });
+        markLocalPush(syncResult?.skill_id || skillId);
         log(`Synced ${relativePath} (repo=${repoUrl ?? 'none'})`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log(`Sync failed for ${skillId}: ${msg}`);
         vscode.window.showErrorMessage(`ModelBound sync failed for ${skillId}: ${msg}`);
+      } finally {
+        inFlightPathSyncs.delete(pathKey);
       }
     };
 
@@ -607,6 +645,7 @@ export async function activate(context: vscode.ExtensionContext) {
       apiKey,
       workspaceRoot,
       log,
+      shouldSkipPull: (skillId, row) => shouldSuppressRecentLocalPush(skillId, row),
       hasLocalCopy: (slug, skillId) => {
         const candidates = [slug, skillId].filter(Boolean) as string[];
         for (const id of candidates) {

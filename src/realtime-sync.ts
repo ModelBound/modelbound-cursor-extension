@@ -35,6 +35,8 @@ interface SkillRow {
   slug?: string | null;
   team_id?: string | null;
   deleted_at?: string | null;
+  updated_at?: string | null;
+  last_ide_sync_at?: string | null;
 }
 
 export interface RealtimeSyncOptions {
@@ -42,6 +44,12 @@ export interface RealtimeSyncOptions {
   tokenEndpoint?: string;
   workspaceRoot: string;
   log: (msg: string) => void;
+  /**
+   * Lets the extension ignore realtime echoes caused by its own recent local
+   * save. Without this, local save → cloud update → realtime pull → local write
+   * can re-trigger the file watcher forever.
+   */
+  shouldSkipPull?: (skillId: string, row: SkillRow) => boolean;
   /**
    * Decides whether the skill is mirrored in this workspace. The realtime
    * watcher only pulls down updates for files the user already has.
@@ -163,6 +171,10 @@ export class RealtimeSync {
       return;
     }
 
+    if (this.opts.shouldSkipPull?.(row.id, row)) {
+      this.opts.log(`RealtimeSync: skipped local echo for ${row.slug ?? row.id}`);
+      return;
+    }
     if (!this.opts.hasLocalCopy(row.slug ?? null, row.id)) return;
     if (this.inflightPulls.has(row.id)) return;
 

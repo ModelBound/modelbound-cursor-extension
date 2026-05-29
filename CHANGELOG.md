@@ -2,6 +2,12 @@
 
 All notable changes to the "ModelBound Context Sync & MCP Server" extension will be documented in this file.
 
+## [1.8.2] - 2026-05-29
+
+### Fixed
+- Prevented local save → realtime pull → file watcher feedback loops by ignoring realtime echoes from the extension's own recent `skills.syncFromIde` calls and suppressing self-written files for longer.
+- Avoided overlapping sync attempts for the same path while a previous upload is still in flight, so the status bar cannot get stuck on repeated `ModelBound: Syncing …` messages.
+
 ## [1.8.1] - 2026-05-29
 
 ### Fixed
