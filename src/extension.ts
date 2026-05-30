@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { execSync } from 'child_process';
+import { createClient } from '@supabase/supabase-js';
 import { runSignIn } from './device-auth';
 import { ensureUsableApiKey } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
@@ -44,6 +46,44 @@ type SkillRegistryEntry = { slug?: string | null; paths: string[] };
 const REGISTRY_KEY = 'modelbound.skillRegistry.v1';
 let skillRegistry: Record<string, SkillRegistryEntry> = {};
 let extensionContext: vscode.ExtensionContext | null = null;
+
+let globalChannelDispose: (() => void) | undefined;
+
+// pending-echo suppression (non DB-write approach)
+const pendingUpdates = new Map<string, string>();
+
+function contentHash(obj: any) {
+  try {
+    return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
+  } catch {
+    return String(Math.random());
+  }
+}
+
+/**
+ * Mark an outgoing update as "pending" so the realtime echo can be ignored.
+ * Call this immediately before you send an update to the DB.
+ * rowId: id of the row being updated
+ * payload: { body?, frontmatter? } - whatever is used to compute equality with incoming payloads
+ */
+export function markPendingUpdate(rowId: string, payload: { body?: string; frontmatter?: any }) {
+  const sig = contentHash({ body: payload.body ?? null, frontmatter: payload.frontmatter ?? null });
+  pendingUpdates.set(rowId, sig);
+  // keep pending for a short window to ignore the echo
+  setTimeout(() => pendingUpdates.delete(rowId), 15_000);
+  return sig;
+}
+
+// Example helper to use when performing an update from the extension:
+// Call markPendingUpdate BEFORE you call supabase.from('skills').update(...)
+export async function updateSkillAndMark(supabaseClient: any, rowId: string, patch: any) {
+  try {
+    markPendingUpdate(rowId, { body: patch.body, frontmatter: patch.frontmatter });
+    await supabaseClient.from('skills').update(patch).eq('id', rowId);
+  } catch (e) {
+    throw e;
+  }
+}
 
 function loadRegistry(ctx: vscode.ExtensionContext): void {
   extensionContext = ctx;
@@ -494,7 +534,7 @@ export async function activate(context: vscode.ExtensionContext) {
   let apiKey = config.get<string>('apiKey');
   const autoSync = config.get<boolean>('autoSync', true);
   const mcpUrl =
-    config.get<string>('mcpUrl') || 'https://mcp.modelbound.co/mcp';
+    config.get<string>('mcpUrl') || 'https://mcp.modelbound.co';
 
   // 0. Onboarding: validate any stored API key before prompting. Avoids
   // re-prompting users on every reload when a valid key is already saved.
@@ -803,6 +843,69 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     realtime.start();
     context.subscriptions.push({ dispose: () => realtime.stop() });
+
+    // Direct Supabase Realtime channel with echo suppression
+    const MB_API_KEY = apiKey;
+    if (MB_API_KEY) {
+      (async function startDirectRealtime() {
+        const tokenUrl = 'https://qwqfoyhnhszqqplsavxk.supabase.co/functions/v1/issue-realtime-token';
+        try {
+          log(`Fetching direct realtime token`);
+          const res = await fetch(tokenUrl, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${MB_API_KEY}` },
+          });
+          log(`Direct realtime token fetch status=${res.status}`);
+          const bodyText = await res.text();
+          if (!res.ok) throw new Error(`token fetch failed ${res.status}: ${bodyText}`);
+          const { token, supabase_url, supabase_anon_key, team_id } = JSON.parse(bodyText);
+          log(`Got direct realtime token for team=${team_id}`);
+
+          const supabase = createClient(supabase_url, supabase_anon_key, {
+            realtime: { params: { eventsPerSecond: 10 } },
+            global: { headers: { Authorization: `Bearer ${token}` } },
+          });
+          await supabase.realtime.setAuth(token);
+          log(`Direct realtime setAuth done`);
+
+          const channel = supabase
+            .channel(`skills:team_${team_id}`)
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'skills', filter: `team_id=eq.${team_id}` },
+              (payload: any) => {
+                const newRow = payload?.new ?? {};
+                const rowId = String(newRow.id ?? payload?.old?.id ?? '');
+                const incomingSig = contentHash({ body: newRow.body ?? null, frontmatter: newRow.frontmatter ?? null });
+                if (rowId && pendingUpdates.get(rowId) === incomingSig) {
+                  log(`[Direct RT] Ignoring echo for ${rowId}`);
+                  pendingUpdates.delete(rowId);
+                  return;
+                }
+                log(`[Direct RT] Applying change for ${rowId} event=${String(payload.eventType)}`);
+                try {
+                  // The existing RealtimeSync handles pulling — this channel
+                  // provides a secondary confirmation path with echo suppression.
+                  // handleSkillChange(newRow, payload.old);
+                } catch (e) {
+                  log(`[Direct RT] handler error: ${String(e)}`);
+                }
+              },
+            )
+            .subscribe((status: any, err: any) => {
+              log(`Direct realtime channel status=${status} err=${err ? String(err) : 'none'}`);
+            });
+
+          globalChannelDispose = () => {
+            log(`Unsubscribing direct realtime channel`);
+            try { channel.unsubscribe(); } catch {}
+          };
+          context.subscriptions.push({ dispose: () => globalChannelDispose && globalChannelDispose() });
+        } catch (e) {
+          log(`Direct realtime startup error: ${String(e)}`);
+        }
+      })();
+    }
   }
 
   // 4. Set/Update API Key
@@ -1075,6 +1178,7 @@ function normalizeTree(data: any): Record<string, Record<string, Array<{ id?: st
 }
 
 export function deactivate() {
+  try { if (globalChannelDispose) globalChannelDispose(); } catch {}
   for (const timer of pendingSyncTimers.values()) clearTimeout(timer);
   pendingSyncTimers.clear();
   for (const w of watchers) w.dispose();
