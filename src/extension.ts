@@ -7,6 +7,9 @@ import { createClient } from '@supabase/supabase-js';
 import { runSignIn } from './device-auth';
 import { ensureUsableApiKey } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
+import { SkillCodeLensProvider } from './skill-lens';
+import { ModelBoundStatusBar } from './status-bar';
+import { versionWebviewHtml, showUndoToast } from './version-webview';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -585,6 +588,10 @@ export async function activate(context: vscode.ExtensionContext) {
     promptSignIn,
   });
 
+  // 0a. Status bar & CodeLens for pipeline/versions/health
+  const statusBar = new ModelBoundStatusBar(apiKey || '', mcpUrl);
+  const skillLens = new SkillCodeLensProvider(apiKey || '', mcpUrl);
+  vscode.languages.registerCodeLensProvider({ pattern: '**/SKILL.md' }, skillLens);
 
   // 1. Ensure canonical .modelbound/ exists
   const localFolder = path.join(workspaceRoot, '.modelbound');
@@ -1156,7 +1163,116 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand);
+  // 9. Run Skill Test
+  const runTestCommand = vscode.commands.registerCommand('modelbound.runSkillTest', async (argSkillId?: string) => {
+    if (!apiKey) {
+      vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
+      return;
+    }
+    let skillId = argSkillId || detectActiveSkillId(workspaceRoot);
+    if (!skillId) {
+      const entered = await vscode.window.showInputBox({ prompt: 'Enter the ModelBound Skill ID to test', placeHolder: 'e.g. my-deploy-skill', ignoreFocusOut: true });
+      if (!entered) return;
+      skillId = entered.trim();
+    }
+    vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Testing ${skillId}...`, 4000);
+    try {
+      const result = await callMcpTool(mcpUrl, apiKey, 'skill.test', { skillId, source: 'cursor-extension' });
+      const res = result as any;
+      const total = (res?.passed || 0) + (res?.failed || 0) + (res?.skipped || 0);
+      const icon = res?.failed ? '$(error)' : '$(check)';
+      vscode.window.showInformationMessage(`${icon} ${skillId}: ${res?.passed ?? 0}/${total} passed, ${res?.failed ?? 0} failed, ${res?.skipped ?? 0} skipped`);
+    } catch (err) {
+      vscode.window.showErrorMessage(`ModelBound test failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // 10. Show Skill Versions (webview)
+  const showVersionsCommand = vscode.commands.registerCommand('modelbound.showSkillVersions', async (argSkillId?: string) => {
+    if (!apiKey) {
+      vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
+      return;
+    }
+    let skillId = argSkillId || detectActiveSkillId(workspaceRoot);
+    if (!skillId) {
+      const entered = await vscode.window.showInputBox({ prompt: 'Enter the ModelBound Skill ID', placeHolder: 'e.g. my-deploy-skill', ignoreFocusOut: true });
+      if (!entered) return;
+      skillId = entered.trim();
+    }
+    try {
+      const result = await callMcpTool(mcpUrl, apiKey, 'skill.versions', { skillId, source: 'cursor-extension' });
+      const versions = (result as any)?.versions || [];
+      const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${skillId}`, vscode.ViewColumn.Beside, { enableScripts: true });
+      panel.webview.html = versionWebviewHtml(skillId, versions);
+      panel.webview.onDidReceiveMessage(async (msg) => {
+        if (msg.type === 'restore' && msg.versionId) {
+          try {
+            const restored = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
+            const content = (restored as any)?.content || '';
+            const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
+            const editor = await vscode.window.showTextDocument(doc, { preview: false });
+            await showUndoToast(editor, `${skillId}@${msg.versionId}`);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Restore failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        if (msg.type === 'diff' && msg.versionId) {
+          try {
+            const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: msg.versionId, versionB: 'current', source: 'cursor-extension' });
+            const diffText = (diffResult as any)?.diff || 'No diff available.';
+            const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
+            await vscode.window.showTextDocument(doc, { preview: true });
+          } catch (err) {
+            vscode.window.showErrorMessage(`Diff failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      });
+    } catch (err) {
+      vscode.window.showErrorMessage(`ModelBound versions failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // 11. Diff Skill Versions
+  const diffVersionsCommand = vscode.commands.registerCommand('modelbound.diffSkillVersions', async () => {
+    if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
+    let skillId = detectActiveSkillId(workspaceRoot);
+    if (!skillId) {
+      const entered = await vscode.window.showInputBox({ prompt: 'Enter the ModelBound Skill ID', placeHolder: 'e.g. my-deploy-skill', ignoreFocusOut: true });
+      if (!entered) return;
+      skillId = entered.trim();
+    }
+    const fromVersion = await vscode.window.showInputBox({ prompt: 'From version (or "latest")', value: 'latest', ignoreFocusOut: true });
+    if (!fromVersion) return;
+    const toVersion = await vscode.window.showInputBox({ prompt: 'To version (or "current")', value: 'current', ignoreFocusOut: true });
+    if (!toVersion) return;
+    try {
+      const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: fromVersion, versionB: toVersion, source: 'cursor-extension' });
+      const diffText = (diffResult as any)?.diff || 'No diff available.';
+      const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
+      await vscode.window.showTextDocument(doc, { preview: true });
+    } catch (err) {
+      vscode.window.showErrorMessage(`ModelBound diff failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // 12. Show Health
+  const showHealthCommand = vscode.commands.registerCommand('modelbound.showHealth', async () => {
+    if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
+    vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Checking health...`, 3000);
+    try {
+      const result = await callMcpTool(mcpUrl, apiKey, 'pipeline.status', { source: 'cursor-extension' });
+      const data = result as any;
+      const score = data?.overallScore ?? '—';
+      const budgets = (data?.budgets || []).map((b: any) => `${b.name}: ${b.used}/${b.limit} (${b.status})`).join('\n  ');
+      const suggestions = (data?.suggestions || []).map((s: string) => `• ${s}`).join('\n');
+      const msg = `Health Score: ${score}/100\n\nBudgets:\n  ${budgets || 'None tracked'}\n\nSuggestions:\n${suggestions || 'None'}`;
+      vscode.window.showInformationMessage(msg, { modal: false }, 'OK');
+    } catch (err) {
+      vscode.window.showErrorMessage(`Health check failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand, runTestCommand, showVersionsCommand, diffVersionsCommand, showHealthCommand, statusBar, { dispose: () => skillLens.refresh() });
 }
 
 // Normalise the various shapes get_resource_tree may return into
