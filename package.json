@@ -1,9 +1,10 @@
 {
-  "name": "modelbound",
-  "displayName": "ModelBound",
-  "description": "Token optimization, Skill Development Pipeline, versions, restore, diff, and benchmark for agent-skill files — inline in Cursor & VS Code.",
-  "version": "0.3.0",
-  "publisher": "modelbound",
+  "name": "modelbound-cursor-extension",
+  "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
+  "icon": "logo_modelbound.png",
+  "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
+  "version": "1.9.0",
+  "publisher": "ModelBound",
   "license": "MIT",
   "icon": "media/icon.png",
   "engines": { "vscode": "^1.84.0" },
@@ -43,24 +44,51 @@
       }
     },
     "commands": [
-      { "command": "modelbound.login", "title": "ModelBound: Login" },
-      { "command": "modelbound.logout", "title": "ModelBound: Logout" },
-      { "command": "modelbound.whoami", "title": "ModelBound: Who am I" },
-      { "command": "modelbound.optimize", "title": "ModelBound: Optimize current skill" },
-      { "command": "modelbound.pipeline", "title": "ModelBound: Run Skill Development Pipeline" },
-      { "command": "modelbound.test", "title": "ModelBound: Run skill test suite" },
-      { "command": "modelbound.benchmark", "title": "ModelBound: Benchmark two versions" },
-      { "command": "modelbound.versions", "title": "ModelBound: Show versions" },
-      { "command": "modelbound.restore", "title": "ModelBound: Restore version…" },
-      { "command": "modelbound.diff", "title": "ModelBound: Diff versions…" },
-      { "command": "modelbound.health", "title": "ModelBound: Health check" }
-    ],
-    "menus": {
-      "editor/title": [
-        { "command": "modelbound.optimize", "when": "modelbound.isSkillFile", "group": "navigation@1" },
-        { "command": "modelbound.versions", "when": "modelbound.isSkillFile", "group": "navigation@2" }
-      ]
-    }
+      {
+        "command": "modelbound.signIn",
+        "title": "ModelBound: Sign In with Browser"
+      },
+      {
+        "command": "modelbound.signOut",
+        "title": "ModelBound: Sign Out"
+      },
+      {
+        "command": "modelbound.pullSkill",
+        "title": "ModelBound: Pull Skill/Context to Local Workspace"
+      },
+      {
+        "command": "modelbound.setApiKey",
+        "title": "ModelBound: Set API Key (Manual)"
+      },
+      {
+        "command": "modelbound.runSkillPipeline",
+        "title": "ModelBound: Run Skill Development Pipeline"
+      },
+      {
+        "command": "modelbound.browseResourceTree",
+        "title": "ModelBound: Browse Resource Tree"
+      },
+      {
+        "command": "modelbound.filterSkills",
+        "title": "ModelBound: Filter Skills\u2026"
+      },
+      {
+        "command": "modelbound.runSkillTest",
+        "title": "ModelBound: Run Skill Test"
+      },
+      {
+        "command": "modelbound.showSkillVersions",
+        "title": "ModelBound: Show Skill Versions"
+      },
+      {
+        "command": "modelbound.diffSkillVersions",
+        "title": "ModelBound: Diff Skill Versions"
+      },
+      {
+        "command": "modelbound.showHealth",
+        "title": "ModelBound: Show Project Health"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
