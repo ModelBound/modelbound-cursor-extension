@@ -1,110 +1,77 @@
 {
-  "name": "modelbound-cursor-extension",
-  "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
-  "icon": "logo_modelbound.png",
-  "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
-  "version": "1.8.6",
-  "publisher": "ModelBound",
+  "name": "modelbound",
+  "displayName": "ModelBound",
+  "description": "Token optimization, Skill Development Pipeline, versions, restore, diff, and benchmark for agent-skill files — inline in Cursor & VS Code.",
+  "version": "0.3.0",
+  "publisher": "modelbound",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ModelBound/modelbound-cursor-extension.git"
-  },
-  "engines": {
-    "vscode": "^1.85.0"
-  },
-  "categories": [
-    "AI",
-    "Programming Languages",
-    "Other"
-  ],
-  "keywords": [
-    "cursor rules",
-    "cursorrules",
-    "MCP",
-    "system prompt",
-    "AI context",
-    "Claude skills",
-    "prompt version control",
-    "cursor rules sync",
-    "MCP server",
-    "AI rules manager",
-    "skill pipeline",
-    "CI/CD for prompts",
-    "agent CI"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./out/extension.js",
+  "icon": "media/icon.png",
+  "engines": { "vscode": "^1.84.0" },
+  "categories": ["Other", "AI", "Linters"],
+  "keywords": ["modelbound", "agent-skills", "token-optimization", "skill-pipeline", "cursor"],
+  "repository": { "type": "git", "url": "https://github.com/ModelBound/modelbound-cursor-extension.git" },
+  "homepage": "https://modelbound.co/open-source",
+  "bugs": { "url": "https://github.com/ModelBound/modelbound-cursor-extension/issues" },
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
     "configuration": {
-      "title": "ModelBound Configuration",
+      "title": "ModelBound",
       "properties": {
-        "modelbound.apiKey": {
+        "modelbound.apiUrl": {
           "type": "string",
-          "default": "",
-          "description": "Your ModelBound.co Secret API Key."
+          "default": "https://modelbound.co",
+          "description": "ModelBound API base URL."
         },
-        "modelbound.autoSync": {
+        "modelbound.skillGlobs": {
+          "type": "array",
+          "default": ["**/skills/**/*.md", "**/.cursor/skills/**/*.md", "**/.agents/skills/**/*.md", "**/SKILL.md"],
+          "description": "Glob patterns identifying skill files for CodeLens + status bar."
+        },
+        "modelbound.showCodeLens": {
           "type": "boolean",
           "default": true,
-          "description": "When enabled, changes to context files (.modelbound, .kiro/skills, .cursor/rules, .claude) automatically sync to ModelBound."
+          "description": "Show Optimize / Pipeline / Versions CodeLens above skill files."
         },
-        "modelbound.mcpUrl": {
-          "type": "string",
-          "default": "https://mcp.modelbound.co",
-          "description": "ModelBound MCP Streamable HTTP endpoint."
-        },
-        "modelbound.authUrl": {
-          "type": "string",
-          "default": "https://modelbound.co/api/extension-device-auth",
-          "description": "ModelBound device authorization endpoint (advanced \u2014 usually leave default)."
+        "modelbound.undoToastSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 600,
+          "description": "How long the undo toast stays open after an optimize/restore."
         }
       }
     },
     "commands": [
-      {
-        "command": "modelbound.signIn",
-        "title": "ModelBound: Sign In with Browser"
-      },
-      {
-        "command": "modelbound.signOut",
-        "title": "ModelBound: Sign Out"
-      },
-      {
-        "command": "modelbound.pullSkill",
-        "title": "ModelBound: Pull Skill/Context to Local Workspace"
-      },
-      {
-        "command": "modelbound.setApiKey",
-        "title": "ModelBound: Set API Key (Manual)"
-      },
-      {
-        "command": "modelbound.runSkillPipeline",
-        "title": "ModelBound: Run Skill Development Pipeline"
-      },
-      {
-        "command": "modelbound.browseResourceTree",
-        "title": "ModelBound: Browse Resource Tree"
-      },
-      {
-        "command": "modelbound.filterSkills",
-        "title": "ModelBound: Filter Skills\u2026"
-      }
-    ]
+      { "command": "modelbound.login", "title": "ModelBound: Login" },
+      { "command": "modelbound.logout", "title": "ModelBound: Logout" },
+      { "command": "modelbound.whoami", "title": "ModelBound: Who am I" },
+      { "command": "modelbound.optimize", "title": "ModelBound: Optimize current skill" },
+      { "command": "modelbound.pipeline", "title": "ModelBound: Run Skill Development Pipeline" },
+      { "command": "modelbound.test", "title": "ModelBound: Run skill test suite" },
+      { "command": "modelbound.benchmark", "title": "ModelBound: Benchmark two versions" },
+      { "command": "modelbound.versions", "title": "ModelBound: Show versions" },
+      { "command": "modelbound.restore", "title": "ModelBound: Restore version…" },
+      { "command": "modelbound.diff", "title": "ModelBound: Diff versions…" },
+      { "command": "modelbound.health", "title": "ModelBound: Health check" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "modelbound.optimize", "when": "modelbound.isSkillFile", "group": "navigation@1" },
+        { "command": "modelbound.versions", "when": "modelbound.isSkillFile", "group": "navigation@2" }
+      ]
+    }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.106.2"
+    "vscode:prepublish": "npm run build",
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
-    "typescript": "^5.3.0"
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.84.0",
+    "@vscode/vsce": "^3.1.0",
+    "typescript": "^5.5.0"
   }
 }
