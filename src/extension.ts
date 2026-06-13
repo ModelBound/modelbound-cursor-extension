@@ -7,9 +7,9 @@ import { createClient } from '@supabase/supabase-js';
 import { runSignIn } from './device-auth';
 import { ensureUsableApiKey } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
+import { getCtx, api, ApiCtx } from './api';
+import { isSkillFile } from './skillDetect';
 import { SkillCodeLensProvider } from './skill-lens';
-import { ModelBoundStatusBar } from './status-bar';
-import { versionWebviewHtml, showUndoToast } from './version-webview';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -589,7 +589,13 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   // 0a. Status bar & CodeLens for pipeline/versions/health
-  const statusBar = new ModelBoundStatusBar(apiKey || '', mcpUrl);
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
+  statusBarItem.text = '$(symbol-misc) ModelBound';
+  statusBarItem.command = 'modelbound.runSkillPipeline';
+  statusBarItem.tooltip = 'ModelBound — click to run Skill Development Pipeline';
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
+  const statusBar = { dispose: () => statusBarItem.dispose() };
   const skillLens = new SkillCodeLensProvider(apiKey || '', mcpUrl);
   vscode.languages.registerCodeLensProvider({ pattern: '**/SKILL.md' }, skillLens);
 
@@ -1203,15 +1209,16 @@ export async function activate(context: vscode.ExtensionContext) {
       const result = await callMcpTool(mcpUrl, apiKey, 'skill.versions', { skillId, source: 'cursor-extension' });
       const versions = (result as any)?.versions || [];
       const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${skillId}`, vscode.ViewColumn.Beside, { enableScripts: true });
-      panel.webview.html = versionWebviewHtml(skillId, versions);
+      const rows = versions.map((v: any) => `<tr><td><code>${(v.id || '').slice(0,10)}</code></td><td>${v.created_at || ''}</td><td>${v.tokens || ''}</td><td><button data-act="diff" data-v="${v.id}">Diff</button> <button data-act="restore" data-v="${v.id}">Restore</button></td></tr>`).join('');
+      panel.webview.html = `<!DOCTYPE html><html><body><h2>Versions: ${skillId}</h2><table><thead><tr><th>ID</th><th>Created</th><th>Tokens</th><th></th></tr></thead><tbody>${rows}</tbody></table><script>const vscode=acquireVsCodeApi();document.body.addEventListener('click',e=>{const t=e.target;if(!(t instanceof HTMLButtonElement))return;const act=t.dataset.act,v=t.dataset.v;vscode.postMessage({type:act,versionId:v})});</script></body></html>`;
       panel.webview.onDidReceiveMessage(async (msg) => {
         if (msg.type === 'restore' && msg.versionId) {
           try {
             const restored = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
             const content = (restored as any)?.content || '';
             const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
-            const editor = await vscode.window.showTextDocument(doc, { preview: false });
-            await showUndoToast(editor, `${skillId}@${msg.versionId}`);
+            await vscode.window.showTextDocument(doc, { preview: false });
+            vscode.window.showInformationMessage(`ModelBound: Restored ${skillId} to version ${msg.versionId.slice(0, 8)}.`);
           } catch (err) {
             vscode.window.showErrorMessage(`Restore failed: ${err instanceof Error ? err.message : String(err)}`);
           }
