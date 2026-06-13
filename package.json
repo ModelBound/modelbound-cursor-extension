@@ -1,45 +1,65 @@
 {
   "name": "modelbound-cursor-extension",
-  "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
+  "displayName": "ModelBound — AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
   "version": "1.9.0",
   "publisher": "ModelBound",
   "license": "MIT",
-  "icon": "media/icon.png",
-  "engines": { "vscode": "^1.84.0" },
-  "categories": ["Other", "AI", "Linters"],
-  "keywords": ["modelbound", "agent-skills", "token-optimization", "skill-pipeline", "cursor"],
-  "repository": { "type": "git", "url": "https://github.com/ModelBound/modelbound-cursor-extension.git" },
-  "homepage": "https://modelbound.co/open-source",
-  "bugs": { "url": "https://github.com/ModelBound/modelbound-cursor-extension/issues" },
-  "main": "./dist/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ModelBound/modelbound-cursor-extension.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "cursor rules",
+    "cursorrules",
+    "MCP",
+    "system prompt",
+    "AI context",
+    "Claude skills",
+    "prompt version control",
+    "cursor rules sync",
+    "MCP server",
+    "AI rules manager",
+    "skill pipeline",
+    "CI/CD for prompts",
+    "agent CI"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "ModelBound",
+      "title": "ModelBound Configuration",
       "properties": {
-        "modelbound.apiUrl": {
+        "modelbound.apiKey": {
           "type": "string",
-          "default": "https://modelbound.co",
-          "description": "ModelBound API base URL."
+          "default": "",
+          "description": "Your ModelBound.co Secret API Key."
         },
-        "modelbound.skillGlobs": {
-          "type": "array",
-          "default": ["**/skills/**/*.md", "**/.cursor/skills/**/*.md", "**/.agents/skills/**/*.md", "**/SKILL.md"],
-          "description": "Glob patterns identifying skill files for CodeLens + status bar."
-        },
-        "modelbound.showCodeLens": {
+        "modelbound.autoSync": {
           "type": "boolean",
           "default": true,
-          "description": "Show Optimize / Pipeline / Versions CodeLens above skill files."
+          "description": "When enabled, changes to context files (.modelbound, .kiro/skills, .cursor/rules, .claude) automatically sync to ModelBound."
         },
-        "modelbound.undoToastSeconds": {
-          "type": "number",
-          "default": 60,
-          "minimum": 5,
-          "maximum": 600,
-          "description": "How long the undo toast stays open after an optimize/restore."
+        "modelbound.mcpUrl": {
+          "type": "string",
+          "default": "https://mcp.modelbound.co",
+          "description": "ModelBound MCP Streamable HTTP endpoint."
+        },
+        "modelbound.authUrl": {
+          "type": "string",
+          "default": "https://modelbound.co/api/extension-device-auth",
+          "description": "ModelBound device authorization endpoint (advanced — usually leave default)."
         }
       }
     },
@@ -70,7 +90,7 @@
       },
       {
         "command": "modelbound.filterSkills",
-        "title": "ModelBound: Filter Skills\u2026"
+        "title": "ModelBound: Filter Skills…"
       },
       {
         "command": "modelbound.runSkillTest",
@@ -91,15 +111,16 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
-    "build": "tsc -p tsconfig.json",
-    "watch": "tsc -p tsconfig.json --watch",
-    "package": "vsce package --no-dependencies"
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.108.1"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
-    "@types/vscode": "^1.84.0",
-    "@vscode/vsce": "^3.1.0",
-    "typescript": "^5.5.0"
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
   }
 }
