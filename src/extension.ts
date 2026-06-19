@@ -27,6 +27,7 @@ const WATCH_ROOTS = [
   '.kiro/skills/',
   '.cursor/rules/',
   '.claude/',
+  '.agents/skills/',
 ];
 
 const SELF_WRITE_SUPPRESS_MS = 30_000;
@@ -43,7 +44,7 @@ const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 // Persistent registry of skills this workspace has touched (pushed or pulled).
 // Key: skill UUID. Value: { slug, paths: absolute file paths }.
 // Used by the realtime watcher to decide whether an MB-side change should
-// land on disk. Without this, MB→IDE pulls get filtered out whenever the
+// land on disk. Without this, MBâIDE pulls get filtered out whenever the
 // local filename doesn't follow `<slug>.md` exactly.
 type SkillRegistryEntry = { slug?: string | null; paths: string[] };
 const REGISTRY_KEY = 'modelbound.skillRegistry.v1';
@@ -285,7 +286,7 @@ function scheduleDebounced(key: string, fn: () => void): void {
 
 /**
  * Call an MCP tool over Streamable HTTP. The spec requires
- * Accept: application/json, text/event-stream — without it,
+ * Accept: application/json, text/event-stream â without it,
  * compliant servers respond with 406.
  *
  * Returns the parsed JSON-RPC `result` payload (or null if the
@@ -447,6 +448,13 @@ function getSkillOutputPaths(workspaceRoot: string, skillId: string): string[] {
     paths.push(path.join(claudeDir, `${skillId}.md`));
   }
 
+  const agentsRoot = path.join(workspaceRoot, '.agents');
+  if (fs.existsSync(agentsRoot)) {
+    const agentsSkillDir = path.join(agentsRoot, 'skills', skillId);
+    fs.mkdirSync(agentsSkillDir, { recursive: true });
+    paths.push(path.join(agentsSkillDir, 'SKILL.md'));
+  }
+
   return paths;
 }
 
@@ -495,7 +503,7 @@ function pipelineHtml(skillId: string): string {
 <body>
 <h2>Skill Development Pipeline</h2>
 <div class="sub">Skill: <code>${skillId}</code></div>
-<div id="root"><div class="meta">Loading status…</div></div>
+<div id="root"><div class="meta">Loading statusâ¦</div></div>
 <script>
   const vscodeApi = acquireVsCodeApi();
   function render(state) {
@@ -510,7 +518,7 @@ function pipelineHtml(skillId: string): string {
       return '<div class="row"><span class="badge ' + cls + '">' + status + '</span><strong>' + label + '</strong><span class="meta" style="margin-left:auto">' + (detail || '') + '</span></div>';
     };
     root.innerHTML =
-      '<div class="meta">Run ' + (state.id || '').slice(0,8) + ' · v' + (state.version || '—') + ' · ' + (state.status || 'unknown') + '</div>' +
+      '<div class="meta">Run ' + (state.id || '').slice(0,8) + ' Â· v' + (state.version || 'â') + ' Â· ' + (state.status || 'unknown') + '</div>' +
       stageRow('test_optimize', 'Test & Optimize') +
       stageRow('production', 'Production') +
       '<pre>' + JSON.stringify(state.stage_results || {}, null, 2) + '</pre>';
@@ -592,7 +600,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
   statusBarItem.text = '$(symbol-misc) ModelBound';
   statusBarItem.command = 'modelbound.runSkillPipeline';
-  statusBarItem.tooltip = 'ModelBound — click to run Skill Development Pipeline';
+  statusBarItem.tooltip = 'ModelBound â click to run Skill Development Pipeline';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
   const statusBar = { dispose: () => statusBarItem.dispose() };
@@ -610,7 +618,7 @@ export async function activate(context: vscode.ExtensionContext) {
     log(`Activated. ide=${ide} workspace=${workspaceRoot} repo=${initial.repoUrl ?? 'none'} branch=${initial.branch ?? 'none'}`);
     if (!initial.repoUrl) {
       vscode.window.showInformationMessage(
-        'ModelBound: no git remote detected — skills will sync without repo association. Run "git remote add origin <url>" and save a skill to re-detect. See the ModelBound output channel for details.'
+        'ModelBound: no git remote detected â skills will sync without repo association. Run "git remote add origin <url>" and save a skill to re-detect. See the ModelBound output channel for details.'
       );
     }
 
@@ -671,7 +679,7 @@ export async function activate(context: vscode.ExtensionContext) {
               });
               markLocalPush(conflictSkillId);
               vscode.window.setStatusBarMessage(`$(check) ModelBound: Overwrote MB with IDE version`, 3000);
-              log(`Force-resolved ${relativePath} → kept IDE version.`);
+              log(`Force-resolved ${relativePath} â kept IDE version.`);
             } catch (e) {
               const m = e instanceof Error ? e.message : String(e);
               vscode.window.showErrorMessage(`Failed to force-resolve: ${m}`);
@@ -704,7 +712,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const returnedSlug = (syncResult as any)?.slug || skillId;
         markLocalPush(returnedId);
         registerSkill(returnedId, returnedSlug, filePath);
-        log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} action=${(syncResult as any)?.action ?? 'updated'}`);
+        log(`Synced ${relativePath} â skill=${returnedId} slug=${returnedSlug} action=${(syncResult as any)?.action ?? 'updated'}`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -763,7 +771,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // location. Used by both the manual pull command and the realtime watcher.
   const pullSkillToDisk = async (skillId: string): Promise<{ paths: string[] }> => {
     if (!apiKey) throw new Error('Not signed in.');
-    log(`Pulling skill ${skillId} from ModelBound…`);
+    log(`Pulling skill ${skillId} from ModelBoundâ¦`);
     const data = await callMcpTool(mcpUrl, apiKey, 'skills.get', {
       file_id: skillId,
       skill_id: skillId,
@@ -795,11 +803,11 @@ export async function activate(context: vscode.ExtensionContext) {
       fs.writeFileSync(destPath, content, 'utf8');
       registerSkill(returnedId, returnedSlug, destPath);
     }
-    log(`Pulled ${returnedId} → ${outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ')}`);
+    log(`Pulled ${returnedId} â ${outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ')}`);
     return { paths: outputPaths };
   };
 
-  // 3. Manual pull command — routes through MCP `get_skill` so usage is tracked
+  // 3. Manual pull command â routes through MCP `get_skill` so usage is tracked
   // server-side (powers per-skill invocation_count / last_invoked_at metrics).
   const pullCommand = vscode.commands.registerCommand('modelbound.pullSkill', async () => {
     const skillId = await vscode.window.showInputBox({
@@ -809,14 +817,14 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       const { paths: outputPaths } = await pullSkillToDisk(skillId);
       const locations = outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ');
-      vscode.window.showInformationMessage(`Pulled ${skillId} → ${locations}`);
+      vscode.window.showInformationMessage(`Pulled ${skillId} â ${locations}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showErrorMessage(`Failed to pull context: ${msg}`);
     }
   });
 
-  // 3b. Realtime push — subscribe to Supabase Realtime so cloud edits land in
+  // 3b. Realtime push â subscribe to Supabase Realtime so cloud edits land in
   // this workspace automatically.
   if (apiKey && autoSync) {
     log(`Starting realtime subscription (registered skills: ${Object.keys(skillRegistry).length})`);
@@ -827,7 +835,7 @@ export async function activate(context: vscode.ExtensionContext) {
       shouldSkipPull: (skillId, row) => shouldSuppressRecentLocalPush(skillId, row),
       hasLocalCopy: (slug, skillId) => {
         if (lookupRegistry(skillId, slug ?? null)) {
-          log(`Realtime: ${slug ?? skillId} matched registry — will pull.`);
+          log(`Realtime: ${slug ?? skillId} matched registry â will pull.`);
           return true;
         }
         const candidates = [slug, skillId].filter(Boolean) as string[];
@@ -843,11 +851,11 @@ export async function activate(context: vscode.ExtensionContext) {
             path.join(workspaceRoot, '.agents', 'skills', id, 'SKILL.md'),
           ];
           if (probes.some((p) => fs.existsSync(p))) {
-            log(`Realtime: ${id} matched probe — will pull.`);
+            log(`Realtime: ${id} matched probe â will pull.`);
             return true;
           }
         }
-        log(`Realtime: skill ${slug ?? skillId} has no local copy in this workspace — ignoring event.`);
+        log(`Realtime: skill ${slug ?? skillId} has no local copy in this workspace â ignoring event.`);
         return false;
       },
       pullSkillToDisk: async (skillId) => {
@@ -897,7 +905,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 log(`[Direct RT] Applying change for ${rowId} event=${String(payload.eventType)}`);
                 try {
-                  // The existing RealtimeSync handles pulling — this channel
+                  // The existing RealtimeSync handles pulling â this channel
                   // provides a secondary confirmation path with echo suppression.
                   // handleSkillChange(newRow, payload.old);
                 } catch (e) {
@@ -982,7 +990,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const panel = vscode.window.createWebviewPanel(
       'modelboundPipeline',
-      `ModelBound Pipeline · ${skillId}`,
+      `ModelBound Pipeline Â· ${skillId}`,
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true }
     );
@@ -1045,7 +1053,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Re-signing in revokes the existing key server-side, so warn first.
     const existing = vscode.workspace.getConfiguration('modelbound').get<string>('apiKey');
     if (existing && existing.trim()) {
-      const masked = existing.slice(0, 12) + '…';
+      const masked = existing.slice(0, 12) + 'â¦';
       const choice = await vscode.window.showWarningMessage(
         `ModelBound: You're already signed in (${masked}). Signing in again will revoke the existing key and issue a new one. Continue?`,
         { modal: false },
@@ -1075,7 +1083,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage('ModelBound: Signed out. Reload window to stop syncing.');
   });
 
-  // 7. Browse Resource Tree — visualise platform → folder → files using get_resource_tree.
+  // 7. Browse Resource Tree â visualise platform â folder â files using get_resource_tree.
   const browseTreeCommand = vscode.commands.registerCommand('modelbound.browseResourceTree', async () => {
     if (!apiKey) {
       vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
@@ -1100,7 +1108,7 @@ export async function activate(context: vscode.ExtensionContext) {
           items.push({
             label,
             description: file.ai_type ? `[${file.ai_type}]` : undefined,
-            detail: `${root}${file.id ? `  ·  ${file.id}` : ''}`,
+            detail: `${root}${file.id ? `  Â·  ${file.id}` : ''}`,
           });
         }
       }
@@ -1108,9 +1116,9 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage(`ModelBound: No files under ${platform}.`);
         return;
       }
-      const picked = await vscode.window.showQuickPick(items, { placeHolder: `${platform} — pick a file to preview` });
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: `${platform} â pick a file to preview` });
       if (!picked) return;
-      const skillId = (picked.detail?.split('·').pop() ?? '').trim() || picked.label;
+      const skillId = (picked.detail?.split('Â·').pop() ?? '').trim() || picked.label;
       try {
         const skill = await callMcpTool(mcpUrl, apiKey, 'get_skill', { skill_id: skillId, file_id: skillId });
         const body: string =
@@ -1127,7 +1135,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // 8. Filter Skills — quick-pick source_platform then ai_type, then list_skills with filters.
+  // 8. Filter Skills â quick-pick source_platform then ai_type, then list_skills with filters.
   const filterSkillsCommand = vscode.commands.registerCommand('modelbound.filterSkills', async () => {
     if (!apiKey) {
       vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
@@ -1152,9 +1160,9 @@ export async function activate(context: vscode.ExtensionContext) {
       const items: vscode.QuickPickItem[] = rows.map((r) => ({
         label: r.name || r.slug || r.id || '(unnamed)',
         description: [r.ai_type, r.source_platform].filter(Boolean).map((s) => `[${s}]`).join(' '),
-        detail: [r.repo, r.source_path].filter(Boolean).join(' · ') || undefined,
+        detail: [r.repo, r.source_path].filter(Boolean).join(' Â· ') || undefined,
       }));
-      const picked = await vscode.window.showQuickPick(items, { placeHolder: `${rows.length} skill(s) — pick to preview` });
+      const picked = await vscode.window.showQuickPick(items, { placeHolder: `${rows.length} skill(s) â pick to preview` });
       if (!picked) return;
       const id = rows.find((r) => (r.name || r.slug || r.id) === picked.label)?.id ?? picked.label;
       const skill = await callMcpTool(mcpUrl, apiKey, 'get_skill', { skill_id: id, file_id: id });
@@ -1208,7 +1216,7 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       const result = await callMcpTool(mcpUrl, apiKey, 'skill.versions', { skillId, source: 'cursor-extension' });
       const versions = (result as any)?.versions || [];
-      const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${skillId}`, vscode.ViewColumn.Beside, { enableScripts: true });
+      const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions Â· ${skillId}`, vscode.ViewColumn.Beside, { enableScripts: true });
       const rows = versions.map((v: any) => `<tr><td><code>${(v.id || '').slice(0,10)}</code></td><td>${v.created_at || ''}</td><td>${v.tokens || ''}</td><td><button data-act="diff" data-v="${v.id}">Diff</button> <button data-act="restore" data-v="${v.id}">Restore</button></td></tr>`).join('');
       panel.webview.html = `<!DOCTYPE html><html><body><h2>Versions: ${skillId}</h2><table><thead><tr><th>ID</th><th>Created</th><th>Tokens</th><th></th></tr></thead><tbody>${rows}</tbody></table><script>const vscode=acquireVsCodeApi();document.body.addEventListener('click',e=>{const t=e.target;if(!(t instanceof HTMLButtonElement))return;const act=t.dataset.act,v=t.dataset.v;vscode.postMessage({type:act,versionId:v})});</script></body></html>`;
       panel.webview.onDidReceiveMessage(async (msg) => {
@@ -1269,9 +1277,9 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       const result = await callMcpTool(mcpUrl, apiKey, 'pipeline.status', { source: 'cursor-extension' });
       const data = result as any;
-      const score = data?.overallScore ?? '—';
+      const score = data?.overallScore ?? 'â';
       const budgets = (data?.budgets || []).map((b: any) => `${b.name}: ${b.used}/${b.limit} (${b.status})`).join('\n  ');
-      const suggestions = (data?.suggestions || []).map((s: string) => `• ${s}`).join('\n');
+      const suggestions = (data?.suggestions || []).map((s: string) => `â¢ ${s}`).join('\n');
       const msg = `Health Score: ${score}/100\n\nBudgets:\n  ${budgets || 'None tracked'}\n\nSuggestions:\n${suggestions || 'None'}`;
       vscode.window.showInformationMessage(msg, { modal: false }, 'OK');
     } catch (err) {
