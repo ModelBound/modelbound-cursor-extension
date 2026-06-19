@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { execSync } from 'child_process';
-import { createClient } from '@supabase/supabase-js';
 import { requestModelBoundCredentials } from './auth-flow';
 import { ensureUsableApiKey, isAuthFailureMessage, prepareSyncAuth, writeAuthCache } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
@@ -39,6 +38,7 @@ let outputChannel: vscode.OutputChannel | undefined;
 const recentSelfWrites = new Map<string, number>();
 const recentLocalPushes = new Map<string, number>();
 const inFlightPathSyncs = new Set<string>();
+const inFlightOpenReconciles = new Set<string>();
 const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // Persistent registry of skills this workspace has touched (pushed or pulled).
@@ -48,45 +48,182 @@ const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 // local filename doesn't follow `<slug>.md` exactly.
 type SkillRegistryEntry = { slug?: string | null; paths: string[] };
 const REGISTRY_KEY = 'modelbound.skillRegistry.v1';
+const LAST_SYNCED_KEY = 'modelbound.lastSyncedContent.v1';
 let skillRegistry: Record<string, SkillRegistryEntry> = {};
 let extensionContext: vscode.ExtensionContext | null = null;
 
-let globalChannelDispose: (() => void) | undefined;
+type LastSyncedEntry = { hash: string; skillId?: string; at: number };
 
-// pending-echo suppression (non DB-write approach)
-const pendingUpdates = new Map<string, string>();
+function hashContent(content: string): string {
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
 
-function contentHash(obj: any) {
+function getLastSyncedHash(filePath: string): LastSyncedEntry | undefined {
+  if (!extensionContext) return undefined;
+  const map = extensionContext.workspaceState.get<Record<string, LastSyncedEntry>>(LAST_SYNCED_KEY, {}) ?? {};
+  return map[path.resolve(filePath)];
+}
+
+function markLastSynced(filePath: string, content: string, skillId?: string): void {
+  if (!extensionContext) return;
+  const map = extensionContext.workspaceState.get<Record<string, LastSyncedEntry>>(LAST_SYNCED_KEY, {}) ?? {};
+  map[path.resolve(filePath)] = { hash: hashContent(content), skillId, at: Date.now() };
+  void extensionContext.workspaceState.update(LAST_SYNCED_KEY, map);
+}
+
+function resolveCloudSkillId(filePath: string, fallbackSlug: string): string {
+  const abs = path.resolve(filePath);
+  const lastSynced = getLastSyncedHash(filePath);
+  if (lastSynced?.skillId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(lastSynced.skillId)) {
+    return lastSynced.skillId;
+  }
+  for (const [key, entry] of Object.entries(skillRegistry)) {
+    if (!entry.paths.includes(abs) && !entry.paths.some((p) => path.resolve(p) === abs)) continue;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key)) return key;
+  }
+  return fallbackSlug;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type SkillTarget = {
+  /** Best MCP identifier — UUID when synced, otherwise filename slug. */
+  skillId: string;
+  slug: string;
+  relativePath: string;
+  filePath: string;
+  label: string;
+};
+
+function forEachWatchableFile(workspaceRoot: string, fn: (absPath: string) => void): void {
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs);
+      else if (entry.isFile()) fn(abs);
+    }
+  };
+  for (const root of WATCH_ROOTS) {
+    const absRoot = path.join(workspaceRoot, root);
+    if (fs.existsSync(absRoot)) walk(absRoot);
+  }
+}
+
+function resolveSkillFromPath(workspaceRoot: string, filePath: string): SkillTarget | null {
+  if (!isWatchablePath(workspaceRoot, filePath)) return null;
+  const abs = path.resolve(filePath);
+  const slug = skillIdFromPath(workspaceRoot, abs);
+  const relativePath = relPath(workspaceRoot, abs);
+  const skillId = resolveCloudSkillId(abs, slug);
+  const entry = lookupRegistry(skillId, slug);
+  const displaySlug = entry?.slug ?? slug;
+  const label = displaySlug !== slug ? `${displaySlug} · ${relativePath}` : relativePath;
+  return { skillId, slug: displaySlug, relativePath, filePath: abs, label };
+}
+
+function listWorkspaceSkillTargets(workspaceRoot: string): SkillTarget[] {
+  const byPath = new Map<string, SkillTarget>();
+  forEachWatchableFile(workspaceRoot, (absPath) => {
+    const target = resolveSkillFromPath(workspaceRoot, absPath);
+    if (target) byPath.set(target.filePath, target);
+  });
+  return [...byPath.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function skillTargetFromHint(workspaceRoot: string, hint: string): SkillTarget | null {
+  const trimmed = hint.trim();
+  if (!trimmed) return null;
+  for (const target of listWorkspaceSkillTargets(workspaceRoot)) {
+    if (
+      target.skillId === trimmed ||
+      target.slug === trimmed ||
+      target.relativePath === trimmed ||
+      skillIdFromPath(workspaceRoot, target.filePath) === trimmed
+    ) {
+      return target;
+    }
+  }
+  return null;
+}
+
+async function pickSkillTarget(
+  workspaceRoot: string,
+  opts: { preferUri?: vscode.Uri; hint?: string; purpose?: string } = {},
+): Promise<SkillTarget | undefined> {
+  const purpose = opts.purpose ?? 'continue';
+
+  if (opts.hint) {
+    const fromHint = skillTargetFromHint(workspaceRoot, opts.hint);
+    if (fromHint) return fromHint;
+  }
+
+  const preferPath = opts.preferUri?.scheme === 'file' ? opts.preferUri.fsPath : undefined;
+  const activePath =
+    preferPath ??
+    (vscode.window.activeTextEditor?.document.uri.scheme === 'file'
+      ? vscode.window.activeTextEditor.document.uri.fsPath
+      : undefined);
+  if (activePath) {
+    const fromActive = resolveSkillFromPath(workspaceRoot, activePath);
+    if (fromActive) return fromActive;
+  }
+
+  const candidates = listWorkspaceSkillTargets(workspaceRoot);
+  if (candidates.length === 1) return candidates[0];
+
+  if (candidates.length > 1) {
+    const picked = await vscode.window.showQuickPick(
+      candidates.map((target) => ({
+        label: target.label,
+        description: target.relativePath,
+        detail: UUID_RE.test(target.skillId) ? 'Synced with ModelBound' : 'Save once to link with ModelBound',
+        target,
+      })),
+      { placeHolder: `Choose a skill file to ${purpose}` },
+    );
+    return (picked as { target?: SkillTarget } | undefined)?.target;
+  }
+
+  const entered = await vscode.window.showInputBox({
+    prompt: `Enter a skill name (filename without .md, e.g. prompt-pr-contributor) to ${purpose}.`,
+    placeHolder: 'prompt-pr-contributor',
+    ignoreFocusOut: true,
+  });
+  if (!entered?.trim()) return undefined;
+  const slug = entered.trim();
+  return { skillId: slug, slug, relativePath: slug, filePath: '', label: slug };
+}
+
+async function ensureSkillUuid(
+  mcpUrl: string,
+  apiKey: string,
+  target: SkillTarget,
+  logFn?: (msg: string) => void,
+): Promise<string> {
+  if (UUID_RE.test(target.skillId)) return target.skillId;
+
   try {
-    return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
+    const parsed = await fetchSkillViaMcp(mcpUrl, apiKey, target.skillId, logFn);
+    if (parsed.id && UUID_RE.test(parsed.id)) {
+      if (target.filePath) registerSkill(parsed.id, parsed.slug, target.filePath);
+      return parsed.id;
+    }
   } catch {
-    return String(Math.random());
+    /* slug lookup failed — fall through */
   }
-}
 
-/**
- * Mark an outgoing update as "pending" so the realtime echo can be ignored.
- * Call this immediately before you send an update to the DB.
- * rowId: id of the row being updated
- * payload: { body?, frontmatter? } - whatever is used to compute equality with incoming payloads
- */
-export function markPendingUpdate(rowId: string, payload: { body?: string; frontmatter?: any }) {
-  const sig = contentHash({ body: payload.body ?? null, frontmatter: payload.frontmatter ?? null });
-  pendingUpdates.set(rowId, sig);
-  // keep pending for a short window to ignore the echo
-  setTimeout(() => pendingUpdates.delete(rowId), 15_000);
-  return sig;
-}
-
-// Example helper to use when performing an update from the extension:
-// Call markPendingUpdate BEFORE you call supabase.from('skills').update(...)
-export async function updateSkillAndMark(supabaseClient: any, rowId: string, patch: any) {
-  try {
-    markPendingUpdate(rowId, { body: patch.body, frontmatter: patch.frontmatter });
-    await supabaseClient.from('skills').update(patch).eq('id', rowId);
-  } catch (e) {
-    throw e;
+  if (target.filePath) {
+    throw new Error(
+      `"${target.label}" is not linked to ModelBound yet. Save the file once to sync it, then retry.`,
+    );
   }
+  throw new Error(`Could not find "${target.label}" in ModelBound. Check the skill name or sync the file first.`);
 }
 
 function loadRegistry(ctx: vscode.ExtensionContext): void {
@@ -242,6 +379,91 @@ function skillIdFromPath(workspaceRoot: string, fsPath: string): string {
   const nativeSkillFile = rel.match(/^(?:\.agents\/skills|\.kiro\/skills|\.claude\/skills)\/([^/]+)\/SKILL\.md$/);
   if (nativeSkillFile) return nativeSkillFile[1];
   return path.basename(fsPath, path.extname(fsPath));
+}
+
+function isModelBoundErrorContent(content: string): boolean {
+  const normalized = content.trim().toLowerCase();
+  return (
+    /^skill not found\b/.test(normalized) ||
+    /^not found\b/.test(normalized) ||
+    /^error[:\s]/.test(normalized)
+  );
+}
+
+type ParsedSkillPayload = {
+  content: string;
+  id: string;
+  slug: string | null;
+  sourcePath: string | null;
+};
+
+function parseSkillMcpPayload(data: unknown, skillId: string): ParsedSkillPayload | null {
+  if (!data) return null;
+  const content =
+    (typeof data === 'object' &&
+    data !== null &&
+    'text' in data &&
+    typeof (data as { text?: unknown }).text === 'string'
+      ? (data as { text: string }).text
+      : typeof data === 'string'
+        ? data
+        : '') || '';
+  if (!content) return null;
+  const obj = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
+  const id = String(obj?.skill_id ?? obj?.id ?? skillId);
+  const slug = typeof obj?.slug === 'string' ? obj.slug : null;
+  const sourcePath = typeof obj?.source_path === 'string' ? obj.source_path : null;
+  return { content, id, slug, sourcePath };
+}
+
+async function fetchSkillViaMcp(
+  mcpUrl: string,
+  activeApiKey: string,
+  skillId: string,
+  logFn?: (msg: string) => void,
+): Promise<ParsedSkillPayload> {
+  const attempts: Array<{ label: string; call: () => Promise<unknown> }> = [
+    {
+      label: 'get_skill',
+      call: () => callMcpTool(mcpUrl, activeApiKey, 'get_skill', { skill_id: skillId, file_id: skillId }),
+    },
+    {
+      label: 'skills.get',
+      call: () => callMcpTool(mcpUrl, activeApiKey, 'skills.get', { skill_id: skillId, file_id: skillId }),
+    },
+    {
+      label: 'modelbound.callTool/skills.get',
+      call: () =>
+        callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
+          tool_name: 'skills.get',
+          arguments: { skill_id: skillId, file_id: skillId },
+        }),
+    },
+  ];
+
+  let lastErr: Error | undefined;
+  for (const attempt of attempts) {
+    try {
+      const data = await attempt.call();
+      const parsed = parseSkillMcpPayload(data, skillId);
+      if (parsed && !isModelBoundErrorContent(parsed.content)) {
+        logFn?.(`Fetched skill ${skillId} via ${attempt.label}`);
+        return parsed;
+      }
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      logFn?.(`Fetch ${skillId} via ${attempt.label} failed: ${lastErr.message}`);
+    }
+  }
+  throw lastErr ?? new Error(`Skill not found or empty (${skillId})`);
+}
+
+function bootstrapSkillRegistryFromWorkspace(workspaceRoot: string): void {
+  forEachWatchableFile(workspaceRoot, (absPath) => {
+    if (!isWatchablePath(workspaceRoot, absPath)) return;
+    const slug = skillIdFromPath(workspaceRoot, absPath);
+    registerSkill(slug, slug, absPath);
+  });
 }
 
 function markSelfWrite(fsPath: string): void {
@@ -487,7 +709,7 @@ function detectActiveSkillId(workspaceRoot: string): string | null {
   return null;
 }
 
-function pipelineHtml(skillId: string): string {
+function pipelineHtml(skillLabel: string): string {
   // Minimal, theme-aware status panel. Polls every 2s via postMessage.
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -509,7 +731,7 @@ function pipelineHtml(skillId: string): string {
 </head>
 <body>
 <h2>Skill Development Pipeline</h2>
-<div class="sub">Skill: <code>${skillId}</code></div>
+<div class="sub">Skill: <code>${skillLabel}</code></div>
 <div id="root"><div class="meta">Loading status…</div></div>
 <script>
   const vscodeApi = acquireVsCodeApi();
@@ -547,6 +769,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) return;
   const workspaceRoot = workspaceFolder.uri.fsPath;
+  bootstrapSkillRegistryFromWorkspace(workspaceRoot);
 
   const config = vscode.workspace.getConfiguration('modelbound');
   const workspaceFolderUri = workspaceFolder.uri;
@@ -591,11 +814,14 @@ export async function activate(context: vscode.ExtensionContext) {
   const mcpUrl =
     config.get<string>('mcpUrl') || 'https://mcp.modelbound.co';
   let apiKey: string | undefined = await resolveActiveApiKey();
+  let cloudPullWatcher: RealtimeSync | undefined;
+  let restartCloudPullWatcher: (() => void) | undefined;
 
   const saveAuthKey = async (key: string) => {
     apiKey = key;
     await setToken(context.secrets, key);
     await writeAuthCache(context.globalState, key);
+    restartCloudPullWatcher?.();
   };
 
   const requireApiKeyForSync = async (source: string): Promise<string | undefined> => {
@@ -619,6 +845,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     if (key) {
       apiKey = key;
+      restartCloudPullWatcher?.();
       return key;
     }
     return undefined;
@@ -644,26 +871,6 @@ export async function activate(context: vscode.ExtensionContext) {
     return false;
   };
 
-  void ensureUsableApiKey({
-    mcpUrl,
-    storedKey: apiKey,
-    globalState: context.globalState,
-    interactive: false,
-    log,
-    clearStoredKey: async () => {
-      await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
-      await clearToken(context.secrets);
-    },
-    promptSignIn,
-  })
-    .then((usableKey) => {
-      apiKey = usableKey ?? apiKey;
-      log(`Auth ${apiKey ? 'ready' : 'not configured'} after startup validation.`);
-    })
-    .catch((err) => {
-      log(`Auth validation failed during startup: ${(err as Error).message ?? String(err)}`);
-    });
-
   // 0a. Status bar & CodeLens for pipeline/versions/health
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
   statusBarItem.text = '$(sync) ModelBound Sync';
@@ -685,35 +892,13 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!event.affectsConfiguration('modelbound.apiKey')) return;
     apiKey = await resolveActiveApiKey();
     log(`Configuration changed: ModelBound API key is ${apiKey ? 'available' : 'not configured'}.`);
+    restartCloudPullWatcher?.();
   });
   context.subscriptions.push(configListener);
 
-  const isModelBoundErrorContent = (content: string): boolean => {
-    const normalized = content.trim().toLowerCase();
-    return (
-      /^skill not found\b/.test(normalized) ||
-      /^not found\b/.test(normalized) ||
-      /^error[:\s]/.test(normalized)
-    );
-  };
-
   const fetchSkillFromCloud = async (skillId: string, activeApiKey: string): Promise<{ content: string; id: string; slug: string | null }> => {
-    const data = await callMcpTool(mcpUrl, activeApiKey, 'skills.get', {
-      file_id: skillId,
-      skill_id: skillId,
-    });
-    const content: string =
-      (data && typeof data === 'object' && 'text' in data && typeof (data as any).text === 'string'
-        ? (data as any).text
-        : typeof data === 'string'
-          ? data
-          : '') || '';
-    if (!content || isModelBoundErrorContent(content)) {
-      throw new Error('ModelBound did not return a usable cloud copy for this skill.');
-    }
-    const id = data && typeof data === 'object' ? (data as any).skill_id ?? (data as any).id ?? skillId : skillId;
-    const slug = data && typeof data === 'object' ? (data as any).slug ?? null : null;
-    return { content, id, slug };
+    const parsed = await fetchSkillViaMcp(mcpUrl, activeApiKey, skillId, log);
+    return { content: parsed.content, id: parsed.id, slug: parsed.slug };
   };
 
   const writeCloudSkillToPath = (cloud: { content: string; id: string; slug: string | null }, destPath: string): void => {
@@ -721,7 +906,21 @@ export async function activate(context: vscode.ExtensionContext) {
     markSelfWrite(destPath);
     fs.writeFileSync(destPath, cloud.content, 'utf8');
     registerSkill(cloud.id, cloud.slug, destPath);
+    markLastSynced(destPath, cloud.content, cloud.id);
   };
+
+  type SyncConflictArgs = {
+    filePath: string;
+    relativePath: string;
+    skillId: string;
+    content: string;
+    sourceIdeName: string;
+    activeApiKey: string;
+    conflictSkillId: string | undefined;
+    message?: string;
+  };
+
+  let handleSyncConflict: (args: SyncConflictArgs) => Promise<void>;
 
   const handleProtectedSyncRejection = async (
     message: string,
@@ -828,62 +1027,25 @@ export async function activate(context: vscode.ExtensionContext) {
         // Server returns a JSON-encoded action payload. Handle conflict locally
         // by offering the user an in-IDE force-resolve, rather than just dying.
         if ((syncResult as any)?.action === 'conflict') {
-          const conflictSkillId = (syncResult as any)?.skill_id as string | undefined;
-          registerSkill(conflictSkillId, null, filePath);
-          log(`Conflict for ${relativePath}: ${(syncResult as any).message ?? 'ModelBound has unsynced edits.'}`);
-          const pick = await vscode.window.showWarningMessage(
-            `ModelBound: "${skillId}" has unsynced edits on ModelBound. Choose how to resolve.`,
-            { modal: false },
-            'Keep my IDE version',
-            'Use ModelBound version',
-            'Open in ModelBound',
-          );
-          if (pick === 'Keep my IDE version' && conflictSkillId) {
-            try {
-              await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-                tool_name: 'skills.resolveConflict',
-                arguments: {
-                  skill_id: conflictSkillId,
-                  resolution: 'keep_ide',
-                  body_md: content,
-                  source_ide: sourceIdeName,
-                },
-              });
-              markLocalPush(conflictSkillId);
-              vscode.window.setStatusBarMessage(`$(check) ModelBound: Overwrote MB with IDE version`, 3000);
-              log(`Force-resolved ${relativePath} → kept IDE version.`);
-            } catch (e) {
-              const m = e instanceof Error ? e.message : String(e);
-              vscode.window.showErrorMessage(`Failed to force-resolve: ${m}`);
-            }
-          } else if (pick === 'Use ModelBound version' && conflictSkillId) {
-            try {
-              await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-                tool_name: 'skills.resolveConflict',
-                arguments: {
-                  skill_id: conflictSkillId,
-                  resolution: 'keep_modelbound',
-                  source_ide: sourceIdeName,
-                },
-              });
-              // Pull the resolved (MB) content down immediately so the on-disk
-              // file matches without waiting on realtime.
-              await pullSkillToDisk(conflictSkillId);
-              vscode.window.setStatusBarMessage(`$(check) ModelBound: Pulled MB version`, 3000);
-            } catch (e) {
-              const m = e instanceof Error ? e.message : String(e);
-              vscode.window.showErrorMessage(`Failed to pull MB version: ${m}`);
-            }
-          } else if (pick === 'Open in ModelBound' && conflictSkillId) {
-            vscode.env.openExternal(vscode.Uri.parse(`https://modelbound.co/skills/${conflictSkillId}`));
-          }
+          await handleSyncConflict({
+            filePath,
+            relativePath,
+            skillId,
+            content,
+            sourceIdeName,
+            activeApiKey,
+            conflictSkillId: (syncResult as any)?.skill_id as string | undefined,
+            message: (syncResult as any)?.message,
+          });
           return;
         }
 
         const returnedId = (syncResult as any)?.skill_id || skillId;
         const returnedSlug = (syncResult as any)?.slug || skillId;
         markLocalPush(returnedId);
+        if (returnedSlug && returnedSlug !== returnedId) markLocalPush(returnedSlug);
         registerSkill(returnedId, returnedSlug, filePath);
+        markLastSynced(filePath, content, returnedId);
         await writeAuthCache(context.globalState, activeApiKey);
         log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} action=${(syncResult as any)?.action ?? 'updated'}`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
@@ -967,30 +1129,19 @@ export async function activate(context: vscode.ExtensionContext) {
   // Reusable: fetch a skill from MCP and write it to every relevant local
   // location. Used by both the manual pull command and the realtime watcher.
   const pullSkillToDisk = async (skillId: string): Promise<{ paths: string[] }> => {
-    if (!apiKey) throw new Error('Not signed in.');
+    const activeApiKey = apiKey || (await resolveActiveApiKey());
+    if (!activeApiKey) throw new Error('Not signed in.');
+    apiKey = activeApiKey;
     log(`Pulling skill ${skillId} from ModelBound…`);
-    const data = await callMcpTool(mcpUrl, apiKey, 'skills.get', {
-      file_id: skillId,
-      skill_id: skillId,
-    });
-    const content: string =
-      (data && typeof data === 'object' && 'text' in data && typeof (data as any).text === 'string'
-        ? (data as any).text
-        : typeof data === 'string'
-          ? data
-          : '') || '';
-    if (!content) throw new Error('Skill not found or empty');
-    if (isModelBoundErrorContent(content)) {
+    const parsed = await fetchSkillViaMcp(mcpUrl, activeApiKey, skillId, log);
+    if (isModelBoundErrorContent(parsed.content)) {
       throw new Error(`ModelBound returned error content for "${skillId}", so it was not written locally.`);
     }
 
-    const returnedSlug = data && typeof data === 'object' ? (data as any).slug ?? null : null;
-    const returnedId = data && typeof data === 'object' ? (data as any).skill_id ?? (data as any).id ?? skillId : skillId;
-
+    const { content, id: returnedId, slug: returnedSlug, sourcePath } = parsed;
     const registryEntry = lookupRegistry(returnedId, returnedSlug) || lookupRegistry(skillId, null);
     const outputPaths: string[] = registryEntry ? [...registryEntry.paths] : getSkillOutputPaths(workspaceRoot, returnedSlug || skillId);
 
-    const sourcePath = data && typeof data === 'object' ? (data as any).source_path : null;
     if (typeof sourcePath === 'string' && isSafeRelativePath(sourcePath)) {
       const sourceAbs = path.join(workspaceRoot, sourcePath);
       if (isWatchablePath(workspaceRoot, sourceAbs) && !outputPaths.includes(sourceAbs)) {
@@ -1002,22 +1153,287 @@ export async function activate(context: vscode.ExtensionContext) {
       markSelfWrite(destPath);
       fs.writeFileSync(destPath, content, 'utf8');
       registerSkill(returnedId, returnedSlug, destPath);
+      markLastSynced(destPath, content, returnedId);
     }
     log(`Pulled ${returnedId} → ${outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ')}`);
     return { paths: outputPaths };
   };
 
+  handleSyncConflict = async ({
+    filePath,
+    relativePath,
+    skillId,
+    content,
+    sourceIdeName,
+    activeApiKey,
+    conflictSkillId,
+    message,
+  }: SyncConflictArgs): Promise<void> => {
+    registerSkill(conflictSkillId, null, filePath);
+    log(`Conflict for ${relativePath}: ${message ?? 'ModelBound has unsynced edits.'}`);
+    const pick = await vscode.window.showWarningMessage(
+      `ModelBound: "${skillId}" has unsynced edits on ModelBound. Choose how to resolve.`,
+      { modal: false },
+      'Keep my IDE version',
+      'Use ModelBound version',
+      'Open in ModelBound',
+    );
+    if (pick === 'Keep my IDE version' && conflictSkillId) {
+      try {
+        await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
+          tool_name: 'skills.resolveConflict',
+          arguments: {
+            skill_id: conflictSkillId,
+            resolution: 'keep_ide',
+            body_md: content,
+            source_ide: sourceIdeName,
+          },
+        });
+        markLocalPush(conflictSkillId);
+        markLastSynced(filePath, content, conflictSkillId);
+        vscode.window.setStatusBarMessage(`$(check) ModelBound: Overwrote MB with IDE version`, 3000);
+        log(`Force-resolved ${relativePath} → kept IDE version.`);
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        vscode.window.showErrorMessage(`Failed to force-resolve: ${m}`);
+      }
+    } else if (pick === 'Use ModelBound version' && conflictSkillId) {
+      try {
+        await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
+          tool_name: 'skills.resolveConflict',
+          arguments: {
+            skill_id: conflictSkillId,
+            resolution: 'keep_modelbound',
+            source_ide: sourceIdeName,
+          },
+        });
+        await pullSkillToDisk(conflictSkillId);
+        vscode.window.setStatusBarMessage(`$(check) ModelBound: Pulled MB version`, 3000);
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        vscode.window.showErrorMessage(`Failed to pull MB version: ${m}`);
+      }
+    } else if (pick === 'Open in ModelBound' && conflictSkillId) {
+      vscode.env.openExternal(vscode.Uri.parse(`https://modelbound.co/skills/${conflictSkillId}`));
+    }
+  };
+
+  const reconcileSkillOnOpen = async (uri: vscode.Uri): Promise<void> => {
+    if (!config.get<boolean>('syncOnOpen', true)) return;
+
+    const filePath = uri.fsPath;
+    const relativePath = relPath(workspaceRoot, filePath);
+    if (!isWatchablePath(workspaceRoot, filePath)) return;
+    if (!autoSync) return;
+    if (shouldSuppressSelfWrite(filePath)) return;
+
+    const pathKey = path.resolve(filePath);
+    if (inFlightOpenReconciles.has(pathKey) || inFlightPathSyncs.has(pathKey)) return;
+
+    const resolved = await resolveActiveApiKey();
+    const auth = await prepareSyncAuth({
+      apiKey: resolved,
+      mcpUrl,
+      globalState: context.globalState,
+      log,
+    });
+    if (!auth.ok) {
+      log(`Open reconcile: skipped ${relativePath} (${auth.reason ?? 'not signed in'})`);
+      return;
+    }
+    const activeApiKey = auth.apiKey;
+    apiKey = activeApiKey;
+
+    const skillId = skillIdFromPath(workspaceRoot, filePath);
+    inFlightOpenReconciles.add(pathKey);
+    try {
+      log(`Open reconcile: checking ${relativePath} against ModelBound…`);
+      const localContent = fs.readFileSync(filePath, 'utf8');
+      const localHash = hashContent(localContent);
+      const lastSynced = getLastSyncedHash(filePath);
+      const cloudSkillId = resolveCloudSkillId(filePath, skillId);
+
+      let cloud: ParsedSkillPayload;
+      try {
+        cloud = await fetchSkillViaMcp(mcpUrl, activeApiKey, cloudSkillId, log);
+      } catch (err) {
+        log(`Open reconcile: no cloud copy for ${skillId} (${(err as Error).message})`);
+        return;
+      }
+      registerSkill(cloud.id, cloud.slug, filePath);
+
+      const cloudHash = hashContent(cloud.content);
+      if (cloudHash === localHash) {
+        markLastSynced(filePath, localContent, cloud.id);
+        log(`Open reconcile: ${relativePath} already matches cloud`);
+        return;
+      }
+
+      if (lastSynced && lastSynced.hash === localHash) {
+        log(`Open reconcile: pulling cloud update for ${relativePath}`);
+        writeCloudSkillToPath(cloud, filePath);
+        vscode.window.setStatusBarMessage(
+          `$(cloud-download) ModelBound: Pulled latest for ${cloud.slug ?? skillId}`,
+          3000,
+        );
+        return;
+      }
+
+      log(`Open reconcile: ${relativePath} differs from cloud; checking sync status…`);
+      const { repoUrl, branch } = getRepoInfo(workspaceRoot);
+      const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
+      const syncResult = await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
+        tool_name: 'skills.syncFromIde',
+        arguments: {
+          repo_url: repoUrl,
+          branch,
+          source_ide: sourceIdeName,
+          source_path: relativePath,
+          body_md: localContent,
+        },
+      });
+
+      if ((syncResult as any)?.action === 'conflict') {
+        await handleSyncConflict({
+          filePath,
+          relativePath,
+          skillId,
+          content: localContent,
+          sourceIdeName,
+          activeApiKey,
+          conflictSkillId: (syncResult as any)?.skill_id as string | undefined,
+          message: (syncResult as any)?.message,
+        });
+        return;
+      }
+
+      const returnedId = (syncResult as any)?.skill_id || cloud.id;
+      const returnedSlug = (syncResult as any)?.slug || cloud.slug || skillId;
+      markLocalPush(returnedId);
+      if (returnedSlug && returnedSlug !== returnedId) markLocalPush(returnedSlug);
+      registerSkill(returnedId, returnedSlug, filePath);
+      markLastSynced(filePath, localContent, returnedId);
+      log(`Open reconcile: synced ${relativePath} → ${(syncResult as any)?.action ?? 'updated'}`);
+    } catch (err) {
+      log(`Open reconcile failed for ${relativePath}: ${(err as Error).message ?? String(err)}`);
+    } finally {
+      inFlightOpenReconciles.delete(pathKey);
+    }
+  };
+
+  const scheduleOpenReconcile = (uri: vscode.Uri) => {
+    if (uri.scheme !== 'file') return;
+    scheduleDebounced(`open:${path.resolve(uri.fsPath)}`, () => {
+      reconcileSkillOnOpen(uri).catch((err) =>
+        log(`Unhandled open reconcile error: ${(err as Error).message ?? String(err)}`),
+      );
+    });
+  };
+
+  const openListener = vscode.workspace.onDidOpenTextDocument((doc) => {
+    scheduleOpenReconcile(doc.uri);
+  });
+  const activeEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor?.document.uri.scheme === 'file') scheduleOpenReconcile(editor.document.uri);
+  });
+  context.subscriptions.push(openListener, activeEditorListener);
+
+  // Reconcile any skill files already open when the extension activates.
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === 'file') scheduleOpenReconcile(doc.uri);
+  }
+
+  const skillHasLocalCopy = (slug: string | null | undefined, skillId: string): boolean => {
+    if (lookupRegistry(skillId, slug ?? null)) {
+      log(`Realtime: ${slug ?? skillId} matched registry — will pull.`);
+      return true;
+    }
+    const candidates = [slug, skillId].filter(Boolean) as string[];
+    for (const id of candidates) {
+      const probes = [
+        path.join(workspaceRoot, '.modelbound', `${id}.md`),
+        path.join(workspaceRoot, '.kiro', 'skills', `${id}.md`),
+        path.join(workspaceRoot, '.kiro', 'skills', id, 'SKILL.md'),
+        path.join(workspaceRoot, '.cursor', 'rules', `${id}.md`),
+        path.join(workspaceRoot, '.cursor', 'rules', `${id}.mdc`),
+        path.join(workspaceRoot, '.claude', `${id}.md`),
+        path.join(workspaceRoot, '.claude', 'skills', id, 'SKILL.md'),
+        path.join(workspaceRoot, '.agents', 'skills', id, 'SKILL.md'),
+      ];
+      if (probes.some((p) => fs.existsSync(p))) {
+        log(`Realtime: ${id} matched probe — will pull.`);
+        return true;
+      }
+    }
+    log(`Realtime: skill ${slug ?? skillId} has no local copy in this workspace — ignoring event.`);
+    return false;
+  };
+
+  const stopCloudPullWatcher = () => {
+    cloudPullWatcher?.stop();
+    cloudPullWatcher = undefined;
+  };
+
+  const startCloudPullWatcher = () => {
+    stopCloudPullWatcher();
+    if (!apiKey || !autoSync) {
+      log(`Cloud pull watcher not started (signedIn=${apiKey ? 'yes' : 'no'}, autoSync=${autoSync ? 'on' : 'off'})`);
+      return;
+    }
+    log(`Starting cloud pull watcher (registered skills: ${Object.keys(skillRegistry).length})`);
+    cloudPullWatcher = new RealtimeSync({
+      apiKey,
+      workspaceRoot,
+      log,
+      shouldSkipPull: (id, row) => shouldSuppressRecentLocalPush(id, row),
+      hasLocalCopy: skillHasLocalCopy,
+      pullSkillToDisk: async (id) => {
+        await pullSkillToDisk(id);
+      },
+    });
+    void cloudPullWatcher.start();
+  };
+
+  restartCloudPullWatcher = startCloudPullWatcher;
+  // Start once after auth validation finishes to avoid racing two token mints.
+  void ensureUsableApiKey({
+    mcpUrl,
+    storedKey: apiKey,
+    globalState: context.globalState,
+    interactive: false,
+    log,
+    clearStoredKey: async () => {
+      await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
+      await clearToken(context.secrets);
+    },
+    promptSignIn,
+  })
+    .then((usableKey) => {
+      apiKey = usableKey ?? apiKey;
+      log(`Auth ${apiKey ? 'ready' : 'not configured'} after startup validation.`);
+    })
+    .catch((err) => {
+      log(`Auth validation failed during startup: ${(err as Error).message ?? String(err)}`);
+    })
+    .finally(() => {
+      restartCloudPullWatcher?.();
+    });
+  context.subscriptions.push({ dispose: () => stopCloudPullWatcher() });
+
   // 3. Manual pull command — routes through MCP `get_skill` so usage is tracked
   // server-side (powers per-skill invocation_count / last_invoked_at metrics).
   const pullCommand = vscode.commands.registerCommand('modelbound.pullSkill', async () => {
-    const skillId = await vscode.window.showInputBox({
-      prompt: 'Enter ModelBound Skill ID',
-    });
-    if (!skillId || !apiKey) return;
+    if (!apiKey) {
+      vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
+      return;
+    }
+    const target = await pickSkillTarget(workspaceRoot, { purpose: 'pull from ModelBound' });
+    if (!target) return;
     try {
-      const { paths: outputPaths } = await pullSkillToDisk(skillId);
+      const skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
+      const { paths: outputPaths } = await pullSkillToDisk(skillUuid);
       const locations = outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ');
-      vscode.window.showInformationMessage(`Pulled ${skillId} → ${locations}`);
+      vscode.window.showInformationMessage(`Pulled ${target.label} → ${locations}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showErrorMessage(`Failed to pull context: ${msg}`);
@@ -1032,111 +1448,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     await syncFileNow(editor.document.uri, true);
   });
-
-  // 3b. Realtime push — subscribe to Supabase Realtime so cloud edits land in
-  // this workspace automatically.
-  if (apiKey && autoSync) {
-    log(`Starting realtime subscription (registered skills: ${Object.keys(skillRegistry).length})`);
-    const realtime = new RealtimeSync({
-      apiKey,
-      workspaceRoot,
-      log,
-      shouldSkipPull: (skillId, row) => shouldSuppressRecentLocalPush(skillId, row),
-      hasLocalCopy: (slug, skillId) => {
-        if (lookupRegistry(skillId, slug ?? null)) {
-          log(`Realtime: ${slug ?? skillId} matched registry — will pull.`);
-          return true;
-        }
-        const candidates = [slug, skillId].filter(Boolean) as string[];
-        for (const id of candidates) {
-          const probes = [
-            path.join(workspaceRoot, '.modelbound', `${id}.md`),
-            path.join(workspaceRoot, '.kiro', 'skills', `${id}.md`),
-            path.join(workspaceRoot, '.kiro', 'skills', id, 'SKILL.md'),
-            path.join(workspaceRoot, '.cursor', 'rules', `${id}.md`),
-            path.join(workspaceRoot, '.cursor', 'rules', `${id}.mdc`),
-            path.join(workspaceRoot, '.claude', `${id}.md`),
-            path.join(workspaceRoot, '.claude', 'skills', id, 'SKILL.md'),
-            path.join(workspaceRoot, '.agents', 'skills', id, 'SKILL.md'),
-          ];
-          if (probes.some((p) => fs.existsSync(p))) {
-            log(`Realtime: ${id} matched probe — will pull.`);
-            return true;
-          }
-        }
-        log(`Realtime: skill ${slug ?? skillId} has no local copy in this workspace — ignoring event.`);
-        return false;
-      },
-      pullSkillToDisk: async (skillId) => {
-        await pullSkillToDisk(skillId);
-      },
-    });
-    realtime.start();
-    context.subscriptions.push({ dispose: () => realtime.stop() });
-
-    // Direct Supabase Realtime channel with echo suppression
-    const MB_API_KEY = apiKey;
-    if (MB_API_KEY) {
-      (async function startDirectRealtime() {
-        const tokenUrl = 'https://qwqfoyhnhszqqplsavxk.supabase.co/functions/v1/issue-realtime-token';
-        try {
-          log(`Fetching direct realtime token`);
-          const res = await fetch(tokenUrl, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${MB_API_KEY}` },
-          });
-          log(`Direct realtime token fetch status=${res.status}`);
-          const bodyText = await res.text();
-          if (!res.ok) throw new Error(`token fetch failed ${res.status}: ${bodyText}`);
-          const { token, supabase_url, supabase_anon_key, team_id } = JSON.parse(bodyText);
-          log(`Got direct realtime token for team=${team_id}`);
-
-          const supabase = createClient(supabase_url, supabase_anon_key, {
-            realtime: { params: { eventsPerSecond: 10 } },
-            global: { headers: { Authorization: `Bearer ${token}` } },
-          });
-          await supabase.realtime.setAuth(token);
-          log(`Direct realtime setAuth done`);
-
-          const channel = supabase
-            .channel(`skills:team_${team_id}`)
-            .on(
-              'postgres_changes',
-              { event: '*', schema: 'public', table: 'skills', filter: `team_id=eq.${team_id}` },
-              (payload: any) => {
-                const newRow = payload?.new ?? {};
-                const rowId = String(newRow.id ?? payload?.old?.id ?? '');
-                const incomingSig = contentHash({ body: newRow.body ?? null, frontmatter: newRow.frontmatter ?? null });
-                if (rowId && pendingUpdates.get(rowId) === incomingSig) {
-                  log(`[Direct RT] Ignoring echo for ${rowId}`);
-                  pendingUpdates.delete(rowId);
-                  return;
-                }
-                log(`[Direct RT] Applying change for ${rowId} event=${String(payload.eventType)}`);
-                try {
-                  // The existing RealtimeSync handles pulling — this channel
-                  // provides a secondary confirmation path with echo suppression.
-                  // handleSkillChange(newRow, payload.old);
-                } catch (e) {
-                  log(`[Direct RT] handler error: ${String(e)}`);
-                }
-              },
-            )
-            .subscribe((status: any, err: any) => {
-              log(`Direct realtime channel status=${status} err=${err ? String(err) : 'none'}`);
-            });
-
-          globalChannelDispose = () => {
-            log(`Unsubscribing direct realtime channel`);
-            try { channel.unsubscribe(); } catch {}
-          };
-          context.subscriptions.push({ dispose: () => globalChannelDispose && globalChannelDispose() });
-        } catch (e) {
-          log(`Direct realtime startup error: ${String(e)}`);
-        }
-      })();
-    }
-  }
 
   // 4. Set/Update API Key
   const setKeyCommand = vscode.commands.registerCommand('modelbound.setApiKey', async () => {
@@ -1158,22 +1469,17 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   // 5. Run Skill Development Pipeline
-  const runPipelineCommand = vscode.commands.registerCommand('modelbound.runSkillPipeline', async () => {
+  const runPipelineCommand = vscode.commands.registerCommand('modelbound.runSkillPipeline', async (argHint?: string) => {
     if (!apiKey) {
       vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
       return;
     }
 
-    let skillId = detectActiveSkillId(workspaceRoot);
-    if (!skillId) {
-      const entered = await vscode.window.showInputBox({
-        prompt: 'Enter the ModelBound Skill ID (UUID or slug) to run the pipeline against',
-        placeHolder: 'e.g. my-deploy-skill or 8f3b...',
-        ignoreFocusOut: true,
-      });
-      if (!entered) return;
-      skillId = entered.trim();
-    }
+    const target = await pickSkillTarget(workspaceRoot, {
+      hint: typeof argHint === 'string' ? argHint : undefined,
+      purpose: 'run the pipeline against',
+    });
+    if (!target) return;
 
     const stage = await vscode.window.showQuickPick(
       [
@@ -1201,11 +1507,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const panel = vscode.window.createWebviewPanel(
       'modelboundPipeline',
-      `ModelBound Pipeline · ${skillId}`,
+      `ModelBound Pipeline · ${target.label}`,
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true }
     );
-    panel.webview.html = pipelineHtml(skillId);
+    panel.webview.html = pipelineHtml(target.label);
 
     let polling = true;
     let lastRunId: string | null = null;
@@ -1214,16 +1520,18 @@ export async function activate(context: vscode.ExtensionContext) {
       polling = false;
     });
 
-    vscode.window.setStatusBarMessage(`$(rocket) ModelBound: Pipeline starting for ${skillId}...`, 4000);
+    vscode.window.setStatusBarMessage(`$(rocket) ModelBound: Pipeline starting for ${target.label}...`, 4000);
 
+    let skillUuid: string;
     try {
+      skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
       const start = await callMcpTool(mcpUrl, apiKey, 'run_skill_pipeline', {
-        skill_id: skillId,
+        skill_id: skillUuid,
         stage: stage.value,
         targets,
       });
       lastRunId = start?.run_id || start?.id || null;
-      log(`Pipeline started for ${skillId} (run=${lastRunId ?? 'unknown'})`);
+      log(`Pipeline started for ${target.label} (${skillUuid}) run=${lastRunId ?? 'unknown'}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       panel.webview.postMessage({ type: 'error', message: msg });
@@ -1236,7 +1544,7 @@ export async function activate(context: vscode.ExtensionContext) {
     while (polling) {
       try {
         const status = await callMcpTool(mcpUrl, apiKey, 'skills.getPipelineStatus', {
-          skill_id: skillId,
+          skill_id: skillUuid,
           limit: 1,
         });
         const latest = status?.runs?.[0] || null;
@@ -1386,63 +1694,63 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   // 9. Run Skill Test
-  const runTestCommand = vscode.commands.registerCommand('modelbound.runSkillTest', async (argSkillId?: string) => {
+  const runTestCommand = vscode.commands.registerCommand('modelbound.runSkillTest', async (argHint?: string) => {
     if (!apiKey) {
       vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
       return;
     }
-    let skillId = argSkillId || detectActiveSkillId(workspaceRoot);
-    if (!skillId) {
-      const entered = await vscode.window.showInputBox({ prompt: 'Enter the ModelBound Skill ID to test', placeHolder: 'e.g. my-deploy-skill', ignoreFocusOut: true });
-      if (!entered) return;
-      skillId = entered.trim();
-    }
-    vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Testing ${skillId}...`, 4000);
+    const target = await pickSkillTarget(workspaceRoot, {
+      hint: typeof argHint === 'string' ? argHint : undefined,
+      purpose: 'run tests against',
+    });
+    if (!target) return;
+    vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Testing ${target.label}...`, 4000);
     try {
-      const result = await callMcpTool(mcpUrl, apiKey, 'skill.test', { skillId, source: 'cursor-extension' });
+      const skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
+      const result = await callMcpTool(mcpUrl, apiKey, 'skill.test', { skillId: skillUuid, source: 'cursor-extension' });
       const res = result as any;
       const total = (res?.passed || 0) + (res?.failed || 0) + (res?.skipped || 0);
       const icon = res?.failed ? '$(error)' : '$(check)';
-      vscode.window.showInformationMessage(`${icon} ${skillId}: ${res?.passed ?? 0}/${total} passed, ${res?.failed ?? 0} failed, ${res?.skipped ?? 0} skipped`);
+      vscode.window.showInformationMessage(`${icon} ${target.label}: ${res?.passed ?? 0}/${total} passed, ${res?.failed ?? 0} failed, ${res?.skipped ?? 0} skipped`);
     } catch (err) {
       vscode.window.showErrorMessage(`ModelBound test failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
   // 10. Show Skill Versions (webview)
-  const showVersionsCommand = vscode.commands.registerCommand('modelbound.showSkillVersions', async (argSkillId?: string) => {
+  const showVersionsCommand = vscode.commands.registerCommand('modelbound.showSkillVersions', async (argHint?: string) => {
     if (!apiKey) {
       vscode.window.showWarningMessage('ModelBound: Set your API key first (ModelBound: Set API Key).');
       return;
     }
-    let skillId = argSkillId || detectActiveSkillId(workspaceRoot);
-    if (!skillId) {
-      const entered = await vscode.window.showInputBox({ prompt: 'Enter the ModelBound Skill ID', placeHolder: 'e.g. my-deploy-skill', ignoreFocusOut: true });
-      if (!entered) return;
-      skillId = entered.trim();
-    }
+    const target = await pickSkillTarget(workspaceRoot, {
+      hint: typeof argHint === 'string' ? argHint : undefined,
+      purpose: 'view versions for',
+    });
+    if (!target) return;
     const activeApiKey = apiKey;
     try {
-      const result = await callMcpTool(mcpUrl, activeApiKey, 'skill.versions', { skillId, source: 'cursor-extension' });
+      const skillUuid = await ensureSkillUuid(mcpUrl, activeApiKey, target, log);
+      const result = await callMcpTool(mcpUrl, activeApiKey, 'skill.versions', { skillId: skillUuid, source: 'cursor-extension' });
       const versions = (result as any)?.versions || [];
-      const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${skillId}`, vscode.ViewColumn.Beside, { enableScripts: true });
+      const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${target.label}`, vscode.ViewColumn.Beside, { enableScripts: true });
       const rows = versions.map((v: any) => `<tr><td><code>${(v.id || '').slice(0,10)}</code></td><td>${v.created_at || ''}</td><td>${v.tokens || ''}</td><td><button data-act="diff" data-v="${v.id}">Diff</button> <button data-act="restore" data-v="${v.id}">Restore</button></td></tr>`).join('');
-      panel.webview.html = `<!DOCTYPE html><html><body><h2>Versions: ${skillId}</h2><table><thead><tr><th>ID</th><th>Created</th><th>Tokens</th><th></th></tr></thead><tbody>${rows}</tbody></table><script>const vscode=acquireVsCodeApi();document.body.addEventListener('click',e=>{const t=e.target;if(!(t instanceof HTMLButtonElement))return;const act=t.dataset.act,v=t.dataset.v;vscode.postMessage({type:act,versionId:v})});</script></body></html>`;
+      panel.webview.html = `<!DOCTYPE html><html><body><h2>Versions: ${target.label}</h2><table><thead><tr><th>ID</th><th>Created</th><th>Tokens</th><th></th></tr></thead><tbody>${rows}</tbody></table><script>const vscode=acquireVsCodeApi();document.body.addEventListener('click',e=>{const t=e.target;if(!(t instanceof HTMLButtonElement))return;const act=t.dataset.act,v=t.dataset.v;vscode.postMessage({type:act,versionId:v})});</script></body></html>`;
       panel.webview.onDidReceiveMessage(async (msg) => {
         if (msg.type === 'restore' && msg.versionId) {
           try {
-            const restored = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
+            const restored = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId: skillUuid, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
             const content = (restored as any)?.content || '';
             const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
             await vscode.window.showTextDocument(doc, { preview: false });
-            vscode.window.showInformationMessage(`ModelBound: Restored ${skillId} to version ${msg.versionId.slice(0, 8)}.`);
+            vscode.window.showInformationMessage(`ModelBound: Restored ${target.label} to version ${msg.versionId.slice(0, 8)}.`);
           } catch (err) {
             vscode.window.showErrorMessage(`Restore failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
         if (msg.type === 'diff' && msg.versionId) {
           try {
-            const diffResult = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId, versionA: msg.versionId, versionB: 'current', source: 'cursor-extension' });
+            const diffResult = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId: skillUuid, versionA: msg.versionId, versionB: 'current', source: 'cursor-extension' });
             const diffText = (diffResult as any)?.diff || 'No diff available.';
             const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
             await vscode.window.showTextDocument(doc, { preview: true });
@@ -1459,18 +1767,15 @@ export async function activate(context: vscode.ExtensionContext) {
   // 11. Diff Skill Versions
   const diffVersionsCommand = vscode.commands.registerCommand('modelbound.diffSkillVersions', async () => {
     if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
-    let skillId = detectActiveSkillId(workspaceRoot);
-    if (!skillId) {
-      const entered = await vscode.window.showInputBox({ prompt: 'Enter the ModelBound Skill ID', placeHolder: 'e.g. my-deploy-skill', ignoreFocusOut: true });
-      if (!entered) return;
-      skillId = entered.trim();
-    }
+    const target = await pickSkillTarget(workspaceRoot, { purpose: 'compare versions for' });
+    if (!target) return;
     const fromVersion = await vscode.window.showInputBox({ prompt: 'From version (or "latest")', value: 'latest', ignoreFocusOut: true });
     if (!fromVersion) return;
     const toVersion = await vscode.window.showInputBox({ prompt: 'To version (or "current")', value: 'current', ignoreFocusOut: true });
     if (!toVersion) return;
     try {
-      const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: fromVersion, versionB: toVersion, source: 'cursor-extension' });
+      const skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
+      const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId: skillUuid, versionA: fromVersion, versionB: toVersion, source: 'cursor-extension' });
       const diffText = (diffResult as any)?.diff || 'No diff available.';
       const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
       await vscode.window.showTextDocument(doc, { preview: true });
@@ -1518,7 +1823,6 @@ function normalizeTree(data: any): Record<string, Record<string, Array<{ id?: st
 }
 
 export function deactivate() {
-  try { if (globalChannelDispose) globalChannelDispose(); } catch {}
   for (const timer of pendingSyncTimers.values()) clearTimeout(timer);
   pendingSyncTimers.clear();
   for (const w of watchers) w.dispose();

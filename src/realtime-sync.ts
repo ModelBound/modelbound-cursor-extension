@@ -9,7 +9,8 @@
 import * as vscode from 'vscode';
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
 
-const TOKEN_ENDPOINT = 'https://modelbound.co/api/issue-realtime-token';
+const TOKEN_ENDPOINT =
+  'https://qwqfoyhnhszqqplsavxk.supabase.co/functions/v1/issue-realtime-token';
 // Refresh ~2 min before expiry to absorb clock skew.
 const REFRESH_LEAD_SECONDS = 120;
 
@@ -75,7 +76,9 @@ export class RealtimeSync {
     try {
       await this.connect();
     } catch (err) {
-      this.opts.log(`RealtimeSync: initial connect failed — ${(err as Error).message ?? String(err)}`);
+      const msg = (err as Error).message ?? String(err);
+      this.opts.log(`RealtimeSync: initial connect failed — ${msg}`);
+      this.scheduleConnectRetry(5_000, 'initial failure');
     }
   }
 
@@ -95,29 +98,66 @@ export class RealtimeSync {
     }
   }
 
-  private async fetchToken(): Promise<TokenResponse> {
+  private async fetchToken(retries = 3): Promise<TokenResponse> {
     const endpoint = this.opts.tokenEndpoint || TOKEN_ENDPOINT;
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.opts.apiKey}`,
-      },
-      body: '{}',
-    });
-    if (!res.ok) {
-      throw new Error(`issue-realtime-token failed: HTTP ${res.status}`);
+    let lastErr: Error | undefined;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.opts.apiKey}`,
+          },
+          body: '{}',
+        });
+        if (!res.ok) {
+          const body = (await res.text().catch(() => '')).trim();
+          const detail = body ? ` — ${body.slice(0, 200)}` : '';
+          const err = new Error(`issue-realtime-token failed: HTTP ${res.status}${detail}`);
+          if (attempt < retries && (res.status >= 500 || res.status === 429)) {
+            this.opts.log(`RealtimeSync: token fetch attempt ${attempt}/${retries} failed (HTTP ${res.status}), retrying…`);
+            await new Promise((r) => setTimeout(r, 400 * attempt));
+            lastErr = err;
+            continue;
+          }
+          throw err;
+        }
+        return (await res.json()) as TokenResponse;
+      } catch (err) {
+        lastErr = err instanceof Error ? err : new Error(String(err));
+        if (attempt < retries) {
+          this.opts.log(`RealtimeSync: token fetch attempt ${attempt}/${retries} errored (${lastErr.message}), retrying…`);
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+          continue;
+        }
+      }
     }
-    return (await res.json()) as TokenResponse;
+    throw lastErr ?? new Error('issue-realtime-token failed');
+  }
+
+  private scheduleConnectRetry(delayMs: number, reason: string): void {
+    if (this.stopped) return;
+    this.opts.log(`RealtimeSync: scheduling reconnect in ${Math.round(delayMs / 1000)}s (${reason})`);
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.connect().catch((err) => {
+        this.opts.log(`RealtimeSync: reconnect failed — ${(err as Error).message ?? String(err)}`);
+        if (!this.stopped) this.scheduleConnectRetry(30_000, 'backoff');
+      });
+    }, delayMs);
   }
 
   private async connect(): Promise<void> {
     if (this.stopped) return;
     const tok = await this.fetchToken();
+    if (this.stopped) return;
 
     // Tear down any previous client/channel.
     if (this.channel) { try { this.channel.unsubscribe(); } catch { /* noop */ } this.channel = null; }
     if (this.client) { try { this.client.removeAllChannels(); } catch { /* noop */ } this.client = null; }
+    if (this.stopped) return;
 
     this.client = createClient(tok.supabase_url, tok.supabase_anon_key || tok.token, {
       auth: { persistSession: false, autoRefreshToken: false },
@@ -141,6 +181,9 @@ export class RealtimeSync {
       )
       .subscribe((status) => {
         this.opts.log(`RealtimeSync: channel status=${status}`);
+        if (status === 'SUBSCRIBED') {
+          this.opts.log(`RealtimeSync: listening on ${tok.realtime.channel} (team=${tok.team_id})`);
+        }
       });
 
     // Schedule a refresh before expiry.
@@ -149,14 +192,9 @@ export class RealtimeSync {
     this.refreshTimer = setTimeout(() => {
       this.connect().catch((err) => {
         this.opts.log(`RealtimeSync: refresh failed — ${(err as Error).message ?? String(err)}`);
-        // Backoff retry in 30s.
-        if (!this.stopped) {
-          this.refreshTimer = setTimeout(() => this.connect().catch(() => { /* noop */ }), 30_000);
-        }
+        if (!this.stopped) this.scheduleConnectRetry(30_000, 'refresh failure');
       });
     }, ttl * 1000);
-
-    this.opts.log(`RealtimeSync: subscribed to ${tok.realtime.channel} (team=${tok.team_id})`);
   }
 
   private handleEvent(payload: any): void {
@@ -164,6 +202,10 @@ export class RealtimeSync {
     const oldRow: SkillRow | undefined = payload?.old;
     const row = newRow || oldRow;
     if (!row?.id) return;
+
+    this.opts.log(
+      `RealtimeSync: ${String(payload?.eventType ?? 'change')} for ${row.slug ?? row.id}`,
+    );
 
     // Skip soft-deletes — let the manual delete flow handle removals.
     if (newRow?.deleted_at) {
@@ -175,9 +217,13 @@ export class RealtimeSync {
       this.opts.log(`RealtimeSync: skipped local echo for ${row.slug ?? row.id}`);
       return;
     }
-    if (!this.opts.hasLocalCopy(row.slug ?? null, row.id)) return;
+    if (!this.opts.hasLocalCopy(row.slug ?? null, row.id)) {
+      this.opts.log(`RealtimeSync: no local copy for ${row.slug ?? row.id} — skipping pull`);
+      return;
+    }
     if (this.inflightPulls.has(row.id)) return;
 
+    this.opts.log(`RealtimeSync: pulling ${row.slug ?? row.id} to disk…`);
     this.inflightPulls.add(row.id);
     this.opts.pullSkillToDisk(row.id)
       .then(() => {
