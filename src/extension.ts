@@ -32,12 +32,14 @@ const WATCH_ROOTS = [
 
 const SELF_WRITE_SUPPRESS_MS = 30_000;
 const RECENT_LOCAL_PUSH_SUPPRESS_MS = 45_000;
+const PENDING_LOCAL_EDIT_MS = 60_000;
 const DEBOUNCE_MS = 1200;
 
 const watchers: vscode.FileSystemWatcher[] = [];
 let outputChannel: vscode.OutputChannel | undefined;
 const recentSelfWrites = new Map<string, number>();
 const recentLocalPushes = new Map<string, number>();
+const pendingLocalEdits = new Map<string, { hash: string; at: number }>();
 const inFlightPathSyncs = new Set<string>();
 const inFlightOpenReconciles = new Set<string>();
 const pendingSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -70,6 +72,58 @@ function markLastSynced(filePath: string, content: string, skillId?: string): vo
   const map = extensionContext.workspaceState.get<Record<string, LastSyncedEntry>>(LAST_SYNCED_KEY, {}) ?? {};
   map[path.resolve(filePath)] = { hash: hashContent(content), skillId, at: Date.now() };
   void extensionContext.workspaceState.update(LAST_SYNCED_KEY, map);
+  clearPendingLocalEdit(filePath);
+}
+
+function markPendingLocalEdit(filePath: string, content: string): void {
+  pendingLocalEdits.set(path.resolve(filePath), { hash: hashContent(content), at: Date.now() });
+}
+
+function clearPendingLocalEdit(filePath: string): void {
+  pendingLocalEdits.delete(path.resolve(filePath));
+}
+
+/** True when the file on disk differs from what we last successfully synced. */
+function isPathDirty(filePath: string, content?: string): boolean {
+  const abs = path.resolve(filePath);
+  const local = content ?? (fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '');
+  const lastSynced = getLastSyncedHash(filePath);
+  if (!lastSynced) return !!local.trim();
+  return hashContent(local) !== lastSynced.hash;
+}
+
+function hasPendingLocalEdit(filePath: string): boolean {
+  const abs = path.resolve(filePath);
+  const pending = pendingLocalEdits.get(abs);
+  if (!pending) return false;
+  if (Date.now() - pending.at > PENDING_LOCAL_EDIT_MS) {
+    pendingLocalEdits.delete(abs);
+    return false;
+  }
+  try {
+    const current = fs.readFileSync(abs, 'utf8');
+    return hashContent(current) === pending.hash;
+  } catch {
+    return false;
+  }
+}
+
+function registryPathsForSkill(skillId: string, slug?: string | null): string[] {
+  const paths = new Set<string>();
+  for (const [key, entry] of Object.entries(skillRegistry)) {
+    if (key === skillId || entry.slug === skillId || (slug && entry.slug === slug)) {
+      for (const p of entry.paths) paths.add(path.resolve(p));
+    }
+  }
+  return [...paths];
+}
+
+function shouldSkipCloudPullForSkill(skillId: string, slug?: string | null): boolean {
+  if (shouldSuppressRecentLocalPush(skillId)) return true;
+  for (const p of registryPathsForSkill(skillId, slug)) {
+    if (hasPendingLocalEdit(p) || isPathDirty(p)) return true;
+  }
+  return false;
 }
 
 function resolveCloudSkillId(filePath: string, fallbackSlug: string): string {
@@ -580,6 +634,8 @@ function markSelfWrite(fsPath: string): void {
 
 function shouldSuppressSelfWrite(fsPath: string): boolean {
   const key = path.resolve(fsPath);
+  // Never treat a user edit as an extension-originated write.
+  if (hasPendingLocalEdit(key) || isPathDirty(key)) return false;
   const ts = recentSelfWrites.get(key);
   if (!ts) return false;
   if (Date.now() - ts <= SELF_WRITE_SUPPRESS_MS) {
@@ -1128,6 +1184,8 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     const activeApiKey = await requireApiKeyForSync(`sync ${relativePath}`);
     if (!activeApiKey) return;
+    const content = fs.readFileSync(filePath, 'utf8');
+    markPendingLocalEdit(filePath, content);
     if (shouldSuppressSelfWrite(filePath)) {
       log(`Skipped self-originated sync for ${relativePath}`);
       return;
@@ -1141,7 +1199,6 @@ export async function activate(context: vscode.ExtensionContext) {
     inFlightPathSyncs.add(pathKey);
     vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
       const { repoUrl, branch } = getRepoInfo(workspaceRoot);
       const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
       log(`Syncing ${relativePath} → ModelBound (source=${sourceIdeName}, repo=${repoUrl ?? 'none'}, branch=${branch ?? 'none'})`);
@@ -1200,6 +1257,12 @@ export async function activate(context: vscode.ExtensionContext) {
       log(`Skipped auto-sync for ${relativePath}: modelbound.autoSync is off.`);
       return;
     }
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      markPendingLocalEdit(filePath, content);
+    } catch {
+      /* file may have been deleted */
+    }
     log(`Queued auto-sync for ${relativePath}`);
     scheduleDebounced(`sync:${path.resolve(filePath)}`, () => {
       syncFileNow(uri).catch((err) => log(`Unhandled sync error: ${(err as Error).message ?? String(err)}`));
@@ -1254,7 +1317,9 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 
   const saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
-    if (doc.uri.scheme === 'file') syncFile(doc.uri);
+    if (doc.uri.scheme !== 'file') return;
+    markPendingLocalEdit(doc.uri.fsPath, doc.getText());
+    syncFile(doc.uri);
   });
   context.subscriptions.push(saveListener);
 
@@ -1281,6 +1346,10 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }
     for (const destPath of outputPaths) {
+      if (hasPendingLocalEdit(destPath) || isPathDirty(destPath)) {
+        log(`Pull skipped ${path.relative(workspaceRoot, destPath)} — local edits pending sync`);
+        continue;
+      }
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
       markSelfWrite(destPath);
       fs.writeFileSync(destPath, content, 'utf8');
@@ -1401,7 +1470,12 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      if (lastSynced && lastSynced.hash === localHash) {
+      // Only pull when local is unchanged since our last sync AND cloud moved since then.
+      if (lastSynced && lastSynced.hash === localHash && cloudHash !== lastSynced.hash) {
+        if (hasPendingLocalEdit(filePath)) {
+          log(`Open reconcile: not pulling ${relativePath} — local save pending sync`);
+          return;
+        }
         log(`Open reconcile: pulling cloud update for ${relativePath}`);
         writeCloudSkillToPath(cloud, filePath);
         vscode.window.setStatusBarMessage(
@@ -1411,7 +1485,11 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      log(`Open reconcile: ${relativePath} differs from cloud; checking sync status…`);
+      if (isPathDirty(filePath, localContent)) {
+        log(`Open reconcile: ${relativePath} has local edits — pushing to cloud`);
+      } else {
+        log(`Open reconcile: ${relativePath} differs from cloud; checking sync status…`);
+      }
       const { repoUrl, branch } = getRepoInfo(workspaceRoot);
       const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
       const syncResult = await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
@@ -1517,7 +1595,8 @@ export async function activate(context: vscode.ExtensionContext) {
       apiKey,
       workspaceRoot,
       log,
-      shouldSkipPull: (id, row) => shouldSuppressRecentLocalPush(id, row),
+      shouldSkipPull: (id, row) =>
+        shouldSuppressRecentLocalPush(id, row) || shouldSkipCloudPullForSkill(id, row?.slug),
       hasLocalCopy: skillHasLocalCopy,
       pullSkillToDisk: async (id) => {
         await pullSkillToDisk(id);
