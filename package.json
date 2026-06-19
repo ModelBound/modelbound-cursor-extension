@@ -3,7 +3,7 @@
   "displayName": "ModelBound — AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
-  "version": "1.9.16",
+  "version": "1.9.17",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -129,8 +129,24 @@
         "title": "ModelBound: Run Skill Test"
       },
       {
+        "command": "modelbound.openTestOptimize",
+        "title": "ModelBound: Test & Optimize Panel"
+      },
+      {
         "command": "modelbound.showSkillFindings",
         "title": "ModelBound: Trust & Safety Findings"
+      },
+      {
+        "command": "modelbound.setPipelineConfig",
+        "title": "ModelBound: Configure Pipeline Gates"
+      },
+      {
+        "command": "modelbound.createEvalCase",
+        "title": "ModelBound: Create Eval Test Case"
+      },
+      {
+        "command": "modelbound.listEvalCases",
+        "title": "ModelBound: List Eval Test Cases"
       },
       {
         "command": "modelbound.ignoreSkillFinding",

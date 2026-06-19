@@ -9,7 +9,7 @@ import { RealtimeSync } from './realtime-sync';
 import { getCtx, api, ApiCtx, setToken, clearToken } from './api';
 import { isSkillFile } from './skillDetect';
 import { SkillCodeLensProvider } from './skill-lens';
-import { registerSkillTrustCommands } from './skill-trust';
+import { registerTestOptimizeCommands } from './test-optimize';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -865,8 +865,8 @@ function pipelineHtml(skillLabel: string): string {
       return '<div class="row"><span class="badge ' + cls + '">' + status + '</span><strong>' + label + '</strong><span class="meta" style="margin-left:auto">' + (detail || '') + '</span></div>';
     };
     root.innerHTML =
-      '<div class="meta">Run ' + (state.id || '').slice(0,8) + ' · v' + (state.version || '—') + ' · ' + (state.status || 'unknown') + '</div>' +
-      stageRow('test_optimize', 'Test & Optimize') +
+      '<div class="meta">Run ' + (state.id || '').slice(0,8) + ' · v' + (state.version_after || state.version_before || state.version || '—') + ' · ' + (state.status || 'unknown') + '</div>' +
+      stageRow('test', 'Test & Optimize') +
       stageRow('production', 'Production') +
       '<pre>' + JSON.stringify(state.stage_results || {}, null, 2) + '</pre>';
   }
@@ -1697,7 +1697,7 @@ export async function activate(context: vscode.ExtensionContext) {
         log(`Pipeline poll failed: ${msg}`);
         break;
       }
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 3000));
     }
   });
 
@@ -1936,7 +1936,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  registerSkillTrustCommands(context, {
+  registerTestOptimizeCommands(context, {
     getApiKey: () => apiKey,
     getMcpUrl: () => mcpUrl,
     workspaceRoot,

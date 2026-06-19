@@ -59,7 +59,7 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
     lenses.push(
       new vscode.CodeLens(range, {
         title: trustText,
-        command: 'modelbound.showSkillFindings',
+        command: 'modelbound.openTestOptimize',
         arguments: [target.skillId],
       }),
     );
