@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { callHostedTool, McpCaller } from './mcp-hosted';
 
 export type SkillFinding = {
   class: string;
@@ -23,8 +24,6 @@ export type SkillFindingsPayload = {
   ignored_keys?: string[];
   updated_at?: string;
 };
-
-type McpCaller = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 
 type SkillTarget = {
   skillId: string;
@@ -59,43 +58,7 @@ export type TestOptimizeDeps = {
   log: (msg: string) => void;
 };
 
-const TOOL_ALIASES: Record<string, string[]> = {
-  run_skill_pipeline: ['skills.runPipeline'],
-  get_skill_pipeline_status: ['skills.getPipelineStatus'],
-  set_skill_pipeline_config: ['skills.setPipelineConfig'],
-  list_skill_findings: ['skills.listFindings'],
-  ignore_skill_finding: ['skills.ignoreFinding'],
-  unignore_skill_finding: ['skills.unignoreFinding'],
-  benchmark_skill: ['skills.benchmark'],
-  compare_skill_versions: ['skills.compareVersions'],
-  suggest_skill_improvements: ['skills.suggestImprovements'],
-  create_eval_case: ['evals.createCase'],
-  list_eval_cases: ['evals.listCases'],
-  run_eval: ['evals.run'],
-  list_eval_results: ['evals.listResults'],
-};
-
 const TERMINAL_PIPELINE = new Set(['passed', 'failed', 'completed', 'errored', 'skipped']);
-
-export async function callHostedTool(
-  callMcp: McpCaller,
-  canonical: string,
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  let lastErr: unknown;
-  for (const name of [canonical, ...(TOOL_ALIASES[canonical] ?? [])]) {
-    try {
-      return await callMcp(name, args);
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  try {
-    return await callMcp('modelbound.callTool', { tool_name: canonical, arguments: args });
-  } catch {
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-  }
-}
 
 export async function fetchSkillFindings(callMcp: McpCaller, skillId: string): Promise<SkillFindingsPayload> {
   const raw = await callHostedTool(callMcp, 'list_skill_findings', { skill_id: skillId });

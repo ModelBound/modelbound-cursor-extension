@@ -10,6 +10,8 @@ import { getCtx, api, ApiCtx, setToken, clearToken } from './api';
 import { isSkillFile } from './skillDetect';
 import { SkillCodeLensProvider } from './skill-lens';
 import { registerTestOptimizeCommands } from './test-optimize';
+import { callHostedTool } from './mcp-hosted';
+import { openVersionsWebview } from './versionsWebview';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -1077,6 +1079,7 @@ export async function activate(context: vscode.ExtensionContext) {
     apiKey = key;
     await setToken(context.secrets, key);
     await writeAuthCache(context.globalState, key);
+    void setModelBoundWorkspaceContext(mcpUrl, key, workspaceRoot, log);
     restartCloudPullWatcher?.();
   };
 
@@ -1157,6 +1160,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const ide = detectIde();
   log(`Activated. ide=${ide} workspace=${workspaceRoot} autoSync=${autoSync ? 'on' : 'off'} signedIn=${apiKey ? 'yes' : 'no'}`);
+  if (apiKey) {
+    void setModelBoundWorkspaceContext(mcpUrl, apiKey, workspaceRoot, log);
+  }
+
+  const callHosted = (canonical: string, args: Record<string, unknown>) => {
+    if (!apiKey) throw new Error('ModelBound API key is not configured.');
+    return callHostedTool((name, a) => callMcpTool(mcpUrl, apiKey!, name, a), canonical, args);
+  };
+
   const configListener = vscode.workspace.onDidChangeConfiguration(async (event) => {
     if (!event.affectsConfiguration('modelbound.apiKey') && !event.affectsConfiguration('modelbound.mcpUrl')) return;
     apiKey = await resolveActiveApiKey();
@@ -1371,13 +1383,14 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       const { repoUrl } = getRepoInfo(workspaceRoot);
       log(`Deleting ${relativePath} from ModelBound (repo=${repoUrl ?? 'none'})`);
-      await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-        tool_name: 'skills.deleteFromIde',
-        arguments: {
+      await callHostedTool(
+        (name, a) => callMcpTool(mcpUrl, activeApiKey, name, a),
+        'delete_skill_from_ide',
+        {
           repo_url: repoUrl,
           source_path: relativePath,
         },
-      });
+      );
       vscode.window.setStatusBarMessage(`$(trash) ModelBound: Removed ${skillId}`, 3000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1469,15 +1482,16 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     if (pick === 'Keep my IDE version' && conflictSkillId) {
       try {
-        await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-          tool_name: 'skills.resolveConflict',
-          arguments: {
+        await callHostedTool(
+          (name, a) => callMcpTool(mcpUrl, activeApiKey, name, a),
+          'resolve_skill_conflict',
+          {
             skill_id: conflictSkillId,
             resolution: 'keep_ide',
             body_md: content,
             source_ide: sourceIdeName,
           },
-        });
+        );
         markLocalPush(conflictSkillId);
         markLastSynced(filePath, content, conflictSkillId);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Overwrote MB with IDE version`, 3000);
@@ -1488,14 +1502,15 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     } else if (pick === 'Use ModelBound version' && conflictSkillId) {
       try {
-        await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-          tool_name: 'skills.resolveConflict',
-          arguments: {
+        await callHostedTool(
+          (name, a) => callMcpTool(mcpUrl, activeApiKey, name, a),
+          'resolve_skill_conflict',
+          {
             skill_id: conflictSkillId,
             resolution: 'keep_modelbound',
             source_ide: sourceIdeName,
           },
-        });
+        );
         await pullSkillToDisk(conflictSkillId);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Pulled MB version`, 3000);
       } catch (e) {
@@ -1823,11 +1838,11 @@ export async function activate(context: vscode.ExtensionContext) {
     let skillUuid: string;
     try {
       skillUuid = await ensureSkillSyncedForMcp(mcpUrl, apiKey, workspaceRoot, target, log);
-      const start = await callMcpTool(mcpUrl, apiKey, 'run_skill_pipeline', {
+      const start = (await callHosted('run_skill_pipeline', {
         skill_id: skillUuid,
         stage: stage.value,
         targets,
-      });
+      })) as Record<string, unknown>;
       lastRunId = (start?.run_id as string | undefined) || (start?.id as string | undefined) || null;
       log(`Pipeline started for ${target.label} (${skillUuid}) run=${lastRunId ?? 'unknown'}`);
       const initial = parsePipelineLatest(start) || (start?.status ? start : null);
@@ -1843,7 +1858,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const TERMINAL = new Set(['passed', 'failed', 'completed', 'errored', 'skipped']);
     while (polling) {
       try {
-        const status = await callMcpTool(mcpUrl, apiKey, 'get_skill_pipeline_status', {
+        const status = await callHosted('get_skill_pipeline_status', {
           skill_id: skillUuid,
           limit: 1,
         });
@@ -2007,11 +2022,33 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Testing ${target.label}...`, 4000);
     try {
       const skillUuid = await ensureSkillSyncedForMcp(mcpUrl, apiKey, workspaceRoot, target, log);
-      const result = await callMcpTool(mcpUrl, apiKey, 'skill.test', { skillId: skillUuid, source: 'cursor-extension' });
-      const res = result as any;
-      const total = (res?.passed || 0) + (res?.failed || 0) + (res?.skipped || 0);
-      const icon = res?.failed ? '$(error)' : '$(check)';
-      vscode.window.showInformationMessage(`${icon} ${target.label}: ${res?.passed ?? 0}/${total} passed, ${res?.failed ?? 0} failed, ${res?.skipped ?? 0} skipped`);
+      const cases = (await callHosted('list_skill_test_cases', { skill_id: skillUuid, limit: 50 })) as {
+        test_cases?: Array<{ id: string; name?: string }>;
+        cases?: Array<{ id: string; name?: string }>;
+      };
+      const rows = cases?.test_cases ?? cases?.cases ?? [];
+      if (!rows.length) {
+        vscode.window.showInformationMessage(
+          `${target.label}: no automated test cases yet. Add cases in ModelBound or run the Test & Optimize pipeline.`,
+        );
+        return;
+      }
+      let passed = 0;
+      let failed = 0;
+      let skipped = 0;
+      for (const row of rows.slice(0, 5)) {
+        try {
+          await callHosted('run_skill_test', { skill_id: skillUuid, test_case_id: row.id });
+          passed++;
+        } catch {
+          failed++;
+        }
+      }
+      if (rows.length > 5) skipped = rows.length - 5;
+      const icon = failed ? '$(error)' : '$(check)';
+      vscode.window.showInformationMessage(
+        `${icon} ${target.label}: ${passed}/${rows.length} passed, ${failed} failed${skipped ? `, ${skipped} not run` : ''}`,
+      );
     } catch (err) {
       vscode.window.showErrorMessage(`ModelBound test failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -2030,38 +2067,30 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!target) return;
     const activeApiKey = apiKey;
     try {
-      const skillUuid = await ensureSkillUuid(mcpUrl, activeApiKey, target, log);
-      const result = await callMcpTool(mcpUrl, activeApiKey, 'skill.versions', { skillId: skillUuid, source: 'cursor-extension' });
-      const versions = (result as any)?.versions || [];
-      const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${target.label}`, vscode.ViewColumn.Beside, { enableScripts: true });
-      const rows = versions.map((v: any) => `<tr><td><code>${(v.id || '').slice(0,10)}</code></td><td>${v.created_at || ''}</td><td>${v.tokens || ''}</td><td><button data-act="diff" data-v="${v.id}">Diff</button> <button data-act="restore" data-v="${v.id}">Restore</button></td></tr>`).join('');
-      panel.webview.html = `<!DOCTYPE html><html><body><h2>Versions: ${target.label}</h2><table><thead><tr><th>ID</th><th>Created</th><th>Tokens</th><th></th></tr></thead><tbody>${rows}</tbody></table><script>const vscode=acquireVsCodeApi();document.body.addEventListener('click',e=>{const t=e.target;if(!(t instanceof HTMLButtonElement))return;const act=t.dataset.act,v=t.dataset.v;vscode.postMessage({type:act,versionId:v})});</script></body></html>`;
-      panel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg.type === 'restore' && msg.versionId) {
-          try {
-            const restored = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId: skillUuid, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
-            const content = (restored as any)?.content || '';
-            const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
-            await vscode.window.showTextDocument(doc, { preview: false });
-            vscode.window.showInformationMessage(`ModelBound: Restored ${target.label} to version ${msg.versionId.slice(0, 8)}.`);
-          } catch (err) {
-            vscode.window.showErrorMessage(`Restore failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-        if (msg.type === 'diff' && msg.versionId) {
-          try {
-            const diffResult = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId: skillUuid, versionA: msg.versionId, versionB: 'current', source: 'cursor-extension' });
-            const diffText = (diffResult as any)?.diff || 'No diff available.';
-            const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
-            await vscode.window.showTextDocument(doc, { preview: true });
-          } catch (err) {
-            vscode.window.showErrorMessage(`Diff failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-      });
+      await openVersionsWebview(async () => getCtx(context.secrets), target.label);
     } catch (err) {
-      vscode.window.showErrorMessage(`ModelBound versions failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Fallback when REST versions API is unavailable.
+      try {
+        const skillUuid = await ensureSkillUuid(mcpUrl, activeApiKey, target, log);
+        const pipeline = (await callHosted('get_skill_pipeline_status', { skill_id: skillUuid, limit: 10 })) as {
+          runs?: Array<Record<string, unknown>>;
+        };
+        const runs = pipeline?.runs ?? [];
+        const doc = await vscode.workspace.openTextDocument({
+          content: JSON.stringify(runs, null, 2),
+          language: 'json',
+        });
+        await vscode.window.showTextDocument(doc, { preview: true });
+      } catch (inner) {
+        vscode.window.showErrorMessage(
+          `ModelBound versions failed: ${(inner as Error).message ?? String(inner)}`,
+        );
+      }
     }
+  });
+
+  const legacyVersionsCommand = vscode.commands.registerCommand('modelbound.versions', async (argHint?: string) => {
+    await vscode.commands.executeCommand('modelbound.showSkillVersions', argHint);
   });
 
   // 11. Diff Skill Versions
@@ -2075,13 +2104,30 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!toVersion) return;
     try {
       const skillUuid = await ensureSkillSyncedForMcp(mcpUrl, apiKey, workspaceRoot, target, log);
-      const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId: skillUuid, versionA: fromVersion, versionB: toVersion, source: 'cursor-extension' });
-      const diffText = (diffResult as any)?.diff || 'No diff available.';
-      const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
+      let currentMd: string | undefined;
+      if (target.filePath) currentMd = fs.readFileSync(target.filePath, 'utf8');
+      const diffResult = await callHosted('compare_skill_versions', {
+        skill_id: skillUuid,
+        current_skill_md: currentMd,
+        version_a: fromVersion,
+        version_b: toVersion,
+      });
+      const doc = await vscode.workspace.openTextDocument({
+        content: JSON.stringify(diffResult, null, 2),
+        language: 'json',
+      });
       await vscode.window.showTextDocument(doc, { preview: true });
     } catch (err) {
       vscode.window.showErrorMessage(`ModelBound diff failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  });
+
+  const legacyDiffCommand = vscode.commands.registerCommand('modelbound.diff', async (args?: { slug?: string; from?: string; to?: string }) => {
+    if (args?.from) {
+      await vscode.commands.executeCommand('modelbound.diffSkillVersions');
+      return;
+    }
+    await vscode.commands.executeCommand('modelbound.diffSkillVersions');
   });
 
   // 12. Show Health
@@ -2089,17 +2135,82 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
     vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Checking health...`, 3000);
     try {
-      const result = await callMcpTool(mcpUrl, apiKey, 'pipeline.status', { source: 'cursor-extension' });
-      const data = result as any;
-      const score = data?.overallScore ?? '—';
-      const budgets = (data?.budgets || []).map((b: any) => `${b.name}: ${b.used}/${b.limit} (${b.status})`).join('\n  ');
-      const suggestions = (data?.suggestions || []).map((s: string) => `• ${s}`).join('\n');
-      const msg = `Health Score: ${score}/100\n\nBudgets:\n  ${budgets || 'None tracked'}\n\nSuggestions:\n${suggestions || 'None'}`;
+      const result = (await callHosted('get_context_health', {})) as {
+        total_files?: number;
+        stale_files?: number;
+        total_tokens?: number;
+        files_with_security_issues?: number;
+        files?: Array<{ title?: string; security_risk?: string; is_stale?: boolean }>;
+      };
+      const risky = (result.files ?? []).filter((f) => f.security_risk && f.security_risk !== 'none').length;
+      const msg = [
+        `Context health for your team:`,
+        `• ${result.total_files ?? 0} files (${result.total_tokens ?? 0} tokens)`,
+        `• ${result.stale_files ?? 0} stale`,
+        `• ${result.files_with_security_issues ?? risky} with security warnings`,
+      ].join('\n');
       vscode.window.showInformationMessage(msg, { modal: false }, 'OK');
     } catch (err) {
       vscode.window.showErrorMessage(`Health check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
+
+  const optimizeCommand = vscode.commands.registerCommand('modelbound.optimize', async () => {
+    if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage('ModelBound: open a skill file to optimize.');
+      return;
+    }
+    const content = editor.document.getText();
+    const intensity = await vscode.window.showQuickPick(['conservative', 'balanced', 'aggressive'], {
+      placeHolder: 'Optimization intensity',
+    });
+    if (!intensity) return;
+    try {
+      const result = (await callHosted('optimize_content', {
+        content,
+        intensity,
+        label: path.basename(editor.document.uri.fsPath),
+      })) as { optimized?: string; content?: string; text?: string };
+      const optimized = result?.optimized ?? result?.content ?? result?.text;
+      if (!optimized) throw new Error('No optimized content returned.');
+      const doc = await vscode.workspace.openTextDocument({ content: optimized, language: editor.document.languageId });
+      await vscode.window.showTextDocument(doc, { preview: false });
+      vscode.window.showInformationMessage('ModelBound: Optimization ready — review and save to sync.');
+    } catch (err) {
+      vscode.window.showErrorMessage(`Optimize failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  const legacyBenchmarkCommand = vscode.commands.registerCommand('modelbound.benchmark', async () => {
+    await vscode.commands.executeCommand('modelbound.benchmarkSkill');
+  });
+
+  const restoreCommand = vscode.commands.registerCommand(
+    'modelbound.restore',
+    async (args?: { slug?: string; versionId?: string }) => {
+      if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
+      const slug =
+        args?.slug ??
+        (await pickSkillTarget(workspaceRoot, { purpose: 'restore a version for' }))?.label;
+      if (!slug) return;
+      const versionId =
+        args?.versionId ??
+        (await vscode.window.showInputBox({ prompt: 'Version ID to restore', ignoreFocusOut: true }));
+      if (!versionId) return;
+      try {
+        const ax = await getCtx(context.secrets);
+        await api(ax, '/api/cli/skill/restore', {
+          method: 'POST',
+          body: { slug, version_id: versionId },
+        });
+        vscode.window.showInformationMessage(`ModelBound: restored ${slug} to ${versionId.slice(0, 8)}.`);
+      } catch (err) {
+        vscode.window.showErrorMessage(`Restore failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  );
 
   registerTestOptimizeCommands(context, {
     getApiKey: () => apiKey,
@@ -2110,12 +2221,32 @@ export async function activate(context: vscode.ExtensionContext) {
     ensureSkillSynced: ensureSkillSyncedForMcp,
     callMcp: (name, args) => {
       if (!apiKey) throw new Error('ModelBound API key is not configured.');
-      return callMcpTool(mcpUrl, apiKey, name, args);
+      return callHostedTool((n, a) => callMcpTool(mcpUrl, apiKey!, n, a), name, args);
     },
     log,
   });
 
-  context.subscriptions.push(pullCommand, syncCurrentFileCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand, runTestCommand, showVersionsCommand, diffVersionsCommand, showHealthCommand, statusBar, { dispose: () => skillLens.refresh() });
+  context.subscriptions.push(
+    pullCommand,
+    syncCurrentFileCommand,
+    setKeyCommand,
+    runPipelineCommand,
+    signInCommand,
+    signOutCommand,
+    browseTreeCommand,
+    filterSkillsCommand,
+    runTestCommand,
+    showVersionsCommand,
+    legacyVersionsCommand,
+    diffVersionsCommand,
+    legacyDiffCommand,
+    showHealthCommand,
+    optimizeCommand,
+    legacyBenchmarkCommand,
+    restoreCommand,
+    statusBar,
+    { dispose: () => skillLens.refresh() },
+  );
 }
 
 // Normalise the various shapes get_resource_tree may return into
