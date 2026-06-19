@@ -290,6 +290,88 @@ async function setModelBoundWorkspaceContext(
   }
 }
 
+type SyncFromIdeResult = {
+  action?: string;
+  skill_id?: string;
+  slug?: string;
+  success?: boolean;
+  message?: string;
+};
+
+function isValidSyncFromIdeResult(result: unknown): result is SyncFromIdeResult {
+  if (!result || typeof result !== 'object') return false;
+  const r = result as SyncFromIdeResult;
+  if (r.action === 'conflict') return true;
+  if (r.success === false) return false;
+  if (typeof r.skill_id === 'string' && UUID_RE.test(r.skill_id)) return true;
+  if (r.action === 'created' || r.action === 'updated') return true;
+  if (r.success === true) return true;
+  return false;
+}
+
+async function pushSkillFromIde(
+  mcpUrl: string,
+  apiKey: string,
+  workspaceRoot: string,
+  filePath: string,
+  content: string,
+  ide: string,
+  logFn?: (msg: string) => void,
+  opts?: { force?: boolean },
+): Promise<SyncFromIdeResult> {
+  await setModelBoundWorkspaceContext(mcpUrl, apiKey, workspaceRoot, logFn);
+  const { repoUrl, branch } = getRepoInfo(workspaceRoot);
+  const relativePath = relPath(workspaceRoot, filePath);
+  const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
+  const args: Record<string, unknown> = {
+    repo_url: repoUrl,
+    branch,
+    source_ide: sourceIdeName,
+    source_path: relativePath,
+    body_md: content,
+  };
+  if (opts?.force) args.force = true;
+
+  const attempts: Array<{ label: string; call: () => Promise<unknown> }> = [
+    {
+      label: 'sync_skill_from_ide',
+      call: () => callMcpTool(mcpUrl, apiKey, 'sync_skill_from_ide', args),
+    },
+    {
+      label: 'modelbound.callTool/skills.syncFromIde',
+      call: () =>
+        callMcpTool(mcpUrl, apiKey, 'modelbound.callTool', {
+          tool_name: 'skills.syncFromIde',
+          arguments: args,
+        }),
+    },
+    {
+      label: 'call_modelbound_tool/skills.syncFromIde',
+      call: () =>
+        callMcpTool(mcpUrl, apiKey, 'call_modelbound_tool', {
+          tool_name: 'skills.syncFromIde',
+          arguments: args,
+        }),
+    },
+  ];
+
+  let lastErr: Error | undefined;
+  for (const attempt of attempts) {
+    try {
+      const result = await attempt.call();
+      if (isValidSyncFromIdeResult(result)) {
+        logFn?.(`Pushed ${relativePath} via ${attempt.label} (action=${result.action ?? 'updated'})`);
+        return result;
+      }
+      logFn?.(`Push ${relativePath} via ${attempt.label} returned unusable payload`);
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      logFn?.(`Push ${relativePath} via ${attempt.label} failed: ${lastErr.message}`);
+    }
+  }
+  throw lastErr ?? new Error(`ModelBound sync returned no skill_id for ${relativePath}`);
+}
+
 function throwIfMcpErrorPayload(name: string, payload: unknown): void {
   if (!payload) return;
   if (typeof payload === 'object' && payload !== null) {
@@ -1116,7 +1198,9 @@ export async function activate(context: vscode.ExtensionContext) {
     localSkillId: string,
     activeApiKey: string,
   ): Promise<boolean> => {
-    if (!message.includes('Refusing to write skill body_md')) return false;
+    if (!/Refusing to (write|create) skill body_md|Refusing catastrophic body_md shrink/i.test(message)) {
+      return false;
+    }
     const rejectedSkillId = message.match(/skill_id=([^) ,]+)/)?.[1] || localSkillId;
     const relativePath = relPath(workspaceRoot, localUri.fsPath);
     log(`Protected sync rejection for ${relativePath}; cloud skill=${rejectedSkillId}`);
@@ -1186,13 +1270,17 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!activeApiKey) return;
     const content = fs.readFileSync(filePath, 'utf8');
     markPendingLocalEdit(filePath, content);
-    if (shouldSuppressSelfWrite(filePath)) {
+    if (!manual && shouldSuppressSelfWrite(filePath)) {
+      clearPendingLocalEdit(filePath);
       log(`Skipped self-originated sync for ${relativePath}`);
       return;
     }
     const pathKey = path.resolve(filePath);
     if (inFlightPathSyncs.has(pathKey)) {
-      log(`Skipped already-running sync for ${relativePath}`);
+      log(`Sync already running for ${relativePath}; queued retry`);
+      scheduleDebounced(`sync-retry:${pathKey}`, () => {
+        syncFileNow(uri, manual).catch((err) => log(`Unhandled sync retry error: ${(err as Error).message ?? String(err)}`));
+      });
       return;
     }
     const skillId = skillIdFromPath(workspaceRoot, filePath);
@@ -1202,16 +1290,16 @@ export async function activate(context: vscode.ExtensionContext) {
       const { repoUrl, branch } = getRepoInfo(workspaceRoot);
       const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
       log(`Syncing ${relativePath} → ModelBound (source=${sourceIdeName}, repo=${repoUrl ?? 'none'}, branch=${branch ?? 'none'})`);
-      const syncResult = await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-        tool_name: 'skills.syncFromIde',
-        arguments: {
-          repo_url: repoUrl,
-          branch,
-          source_ide: sourceIdeName,
-          source_path: relativePath,
-          body_md: content,
-        },
-      });
+      const syncResult = await pushSkillFromIde(
+        mcpUrl,
+        activeApiKey,
+        workspaceRoot,
+        filePath,
+        content,
+        ide,
+        log,
+        { force: manual },
+      );
 
         // Server returns a JSON-encoded action payload. Handle conflict locally
         // by offering the user an in-IDE force-resolve, rather than just dying.
@@ -1472,17 +1560,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
       // Only pull when local is unchanged since our last sync AND cloud moved since then.
       if (lastSynced && lastSynced.hash === localHash && cloudHash !== lastSynced.hash) {
-        if (hasPendingLocalEdit(filePath)) {
-          log(`Open reconcile: not pulling ${relativePath} — local save pending sync`);
+        if (hasPendingLocalEdit(filePath) || isPathDirty(filePath, localContent)) {
+          log(`Open reconcile: ${relativePath} has pending local edits — pushing instead of pulling`);
+        } else {
+          log(`Open reconcile: pulling cloud update for ${relativePath}`);
+          writeCloudSkillToPath(cloud, filePath);
+          vscode.window.setStatusBarMessage(
+            `$(cloud-download) ModelBound: Pulled latest for ${cloud.slug ?? skillId}`,
+            3000,
+          );
           return;
         }
-        log(`Open reconcile: pulling cloud update for ${relativePath}`);
-        writeCloudSkillToPath(cloud, filePath);
-        vscode.window.setStatusBarMessage(
-          `$(cloud-download) ModelBound: Pulled latest for ${cloud.slug ?? skillId}`,
-          3000,
-        );
-        return;
       }
 
       if (isPathDirty(filePath, localContent)) {
@@ -1490,18 +1578,16 @@ export async function activate(context: vscode.ExtensionContext) {
       } else {
         log(`Open reconcile: ${relativePath} differs from cloud; checking sync status…`);
       }
-      const { repoUrl, branch } = getRepoInfo(workspaceRoot);
       const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
-      const syncResult = await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
-        tool_name: 'skills.syncFromIde',
-        arguments: {
-          repo_url: repoUrl,
-          branch,
-          source_ide: sourceIdeName,
-          source_path: relativePath,
-          body_md: localContent,
-        },
-      });
+      const syncResult = await pushSkillFromIde(
+        mcpUrl,
+        activeApiKey,
+        workspaceRoot,
+        filePath,
+        localContent,
+        ide,
+        log,
+      );
 
       if ((syncResult as any)?.action === 'conflict') {
         await handleSyncConflict({
