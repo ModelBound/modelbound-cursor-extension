@@ -200,6 +200,108 @@ async function pickSkillTarget(
   return { skillId: slug, slug, relativePath: slug, filePath: '', label: slug };
 }
 
+function repoFullNameFromRepoUrl(repoUrl: string | null): string | undefined {
+  if (!repoUrl) return undefined;
+  try {
+    const parts = new URL(repoUrl.replace(/^git@([^:]+):/, 'https://$1/'))
+      .pathname.replace(/^\//, '')
+      .replace(/\.git$/, '')
+      .split('/')
+      .filter(Boolean);
+    if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
+  } catch {
+    /* ignore malformed remotes */
+  }
+  return undefined;
+}
+
+async function setModelBoundWorkspaceContext(
+  mcpUrl: string,
+  apiKey: string,
+  workspaceRoot: string,
+  logFn?: (msg: string) => void,
+): Promise<void> {
+  const { repoUrl } = getRepoInfo(workspaceRoot);
+  const repoFullName = repoFullNameFromRepoUrl(repoUrl);
+  try {
+    await callMcpTool(mcpUrl, apiKey, 'set_workspace_context', {
+      workspace_path: workspaceRoot,
+      repo_full_name: repoFullName,
+      file_hints: ['.modelbound', '.cursor/rules', '.kiro/skills', '.claude'],
+    });
+    logFn?.(`Workspace context set (repo=${repoFullName ?? 'none'})`);
+  } catch (err) {
+    logFn?.(`Workspace context failed: ${(err as Error).message ?? String(err)}`);
+  }
+}
+
+function throwIfMcpErrorPayload(name: string, payload: unknown): void {
+  if (!payload) return;
+  if (typeof payload === 'object' && payload !== null) {
+    const obj = payload as Record<string, unknown>;
+    if (obj.error && !obj.runs && !obj.run && !obj.stage_results && obj.success !== true) {
+      throw new Error(String(obj.message || obj.error));
+    }
+    if (typeof obj.text === 'string') {
+      const text = obj.text.trim();
+      if (text.includes('[MCP_ERROR]') || text.startsWith('Pipeline failed:') || text.startsWith('Lookup failed:')) {
+        throw new Error(text.split('\n').pop()?.trim() || text);
+      }
+    }
+  }
+  if (typeof payload === 'string') {
+    const text = payload.trim();
+    if (text.includes('[MCP_ERROR]') || text.startsWith('Pipeline failed:') || text.startsWith('Lookup failed:')) {
+      throw new Error(text);
+    }
+  }
+}
+
+function parsePipelineLatest(status: unknown): Record<string, unknown> | null {
+  if (!status || typeof status !== 'object') return null;
+  const data = status as Record<string, unknown>;
+  if (data.error) return null;
+  if (Array.isArray(data.runs) && data.runs[0] && typeof data.runs[0] === 'object') {
+    return data.runs[0] as Record<string, unknown>;
+  }
+  if (data.run && typeof data.run === 'object') return data.run as Record<string, unknown>;
+  if (data.status && data.stage_results) return data;
+  return null;
+}
+
+async function ensureSkillSyncedForMcp(
+  mcpUrl: string,
+  apiKey: string,
+  workspaceRoot: string,
+  target: SkillTarget,
+  logFn?: (msg: string) => void,
+): Promise<string> {
+  await setModelBoundWorkspaceContext(mcpUrl, apiKey, workspaceRoot, logFn);
+
+  if (target.filePath) {
+    const content = fs.readFileSync(target.filePath, 'utf8');
+    const { repoUrl, branch } = getRepoInfo(workspaceRoot);
+    const sync = await callMcpTool(mcpUrl, apiKey, 'sync_skill_from_ide', {
+      repo_url: repoUrl,
+      branch,
+      source_ide: sourceIdeFromPath(workspaceRoot, target.filePath, detectIde()),
+      source_path: target.relativePath,
+      body_md: content,
+    });
+    const syncedId = typeof sync?.skill_id === 'string' ? sync.skill_id : undefined;
+    if (syncedId && UUID_RE.test(syncedId)) {
+      registerSkill(syncedId, (sync?.slug as string | undefined) ?? target.slug, target.filePath);
+      markLastSynced(target.filePath, content, syncedId);
+      logFn?.(`Linked ${target.relativePath} → skill ${syncedId} (${String(sync?.action ?? 'synced')})`);
+      return syncedId;
+    }
+  }
+
+  if (UUID_RE.test(target.skillId)) return target.skillId;
+
+  return ensureSkillUuid(mcpUrl, apiKey, target, logFn);
+}
+
 async function ensureSkillUuid(
   mcpUrl: string,
   apiKey: string,
@@ -207,6 +309,11 @@ async function ensureSkillUuid(
   logFn?: (msg: string) => void,
 ): Promise<string> {
   if (UUID_RE.test(target.skillId)) return target.skillId;
+
+  if (target.filePath) {
+    const last = getLastSyncedHash(target.filePath);
+    if (last?.skillId && UUID_RE.test(last.skillId)) return last.skillId;
+  }
 
   try {
     const parsed = await fetchSkillViaMcp(mcpUrl, apiKey, target.skillId, logFn);
@@ -640,15 +747,25 @@ async function callMcpTool(
   // Prefer structuredContent if present, otherwise try to JSON-parse the first text block.
   const result = parsed?.result ?? null;
   if (!result) return null;
-  if (result.structuredContent) return result.structuredContent;
+  if (result.structuredContent) {
+    throwIfMcpErrorPayload(name, result.structuredContent);
+    return result.structuredContent;
+  }
   const txt = result.content?.[0]?.text;
   if (typeof txt === 'string') {
+    if (txt.includes('[MCP_ERROR]') || txt.startsWith('Pipeline failed:') || txt.startsWith('Lookup failed:')) {
+      throw new Error(txt.split('\n').pop()?.trim() || txt.trim());
+    }
     try {
-      return JSON.parse(txt);
-    } catch {
+      const parsedTxt = JSON.parse(txt);
+      throwIfMcpErrorPayload(name, parsedTxt);
+      return parsedTxt;
+    } catch (err) {
+      if (err instanceof Error && !(err instanceof SyntaxError)) throw err;
       return { text: txt };
     }
   }
+  throwIfMcpErrorPayload(name, result);
   return result;
 }
 
@@ -737,7 +854,7 @@ function pipelineHtml(skillLabel: string): string {
   const vscodeApi = acquireVsCodeApi();
   function render(state) {
     const root = document.getElementById('root');
-    if (!state) { root.innerHTML = '<div class="meta">No runs yet. Commit a change in the ModelBound editor or call run_skill_pipeline.</div>'; return; }
+    if (!state) { root.innerHTML = '<div class="meta">Waiting for pipeline status…</div>'; return; }
     const stages = state.stage_results || {};
     const stageRow = (key, label) => {
       const s = stages[key];
@@ -1430,6 +1547,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const target = await pickSkillTarget(workspaceRoot, { purpose: 'pull from ModelBound' });
     if (!target) return;
     try {
+      await setModelBoundWorkspaceContext(mcpUrl, apiKey, workspaceRoot, log);
       const skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
       const { paths: outputPaths } = await pullSkillToDisk(skillUuid);
       const locations = outputPaths.map((p) => path.relative(workspaceRoot, p)).join(', ');
@@ -1524,14 +1642,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let skillUuid: string;
     try {
-      skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
+      skillUuid = await ensureSkillSyncedForMcp(mcpUrl, apiKey, workspaceRoot, target, log);
       const start = await callMcpTool(mcpUrl, apiKey, 'run_skill_pipeline', {
         skill_id: skillUuid,
         stage: stage.value,
         targets,
       });
-      lastRunId = start?.run_id || start?.id || null;
+      lastRunId = (start?.run_id as string | undefined) || (start?.id as string | undefined) || null;
       log(`Pipeline started for ${target.label} (${skillUuid}) run=${lastRunId ?? 'unknown'}`);
+      const initial = parsePipelineLatest(start) || (start?.status ? start : null);
+      if (initial) panel.webview.postMessage({ type: 'state', state: initial });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       panel.webview.postMessage({ type: 'error', message: msg });
@@ -1543,15 +1663,15 @@ export async function activate(context: vscode.ExtensionContext) {
     const TERMINAL = new Set(['passed', 'failed', 'completed', 'errored', 'skipped']);
     while (polling) {
       try {
-        const status = await callMcpTool(mcpUrl, apiKey, 'skills.getPipelineStatus', {
+        const status = await callMcpTool(mcpUrl, apiKey, 'get_skill_pipeline_status', {
           skill_id: skillUuid,
           limit: 1,
         });
-        const latest = status?.runs?.[0] || null;
+        const latest = parsePipelineLatest(status);
         panel.webview.postMessage({ type: 'state', state: latest });
-        if (latest && TERMINAL.has(latest.status)) {
+        if (latest && TERMINAL.has(String(latest.status))) {
           vscode.window.setStatusBarMessage(
-            `$(${latest.status === 'passed' || latest.status === 'completed' ? 'check' : 'error'}) ModelBound: Pipeline ${latest.status}`,
+            `$(${String(latest.status) === 'passed' || String(latest.status) === 'completed' ? 'check' : 'error'}) ModelBound: Pipeline ${latest.status}`,
             5000
           );
           break;
@@ -1706,7 +1826,7 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!target) return;
     vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Testing ${target.label}...`, 4000);
     try {
-      const skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
+      const skillUuid = await ensureSkillSyncedForMcp(mcpUrl, apiKey, workspaceRoot, target, log);
       const result = await callMcpTool(mcpUrl, apiKey, 'skill.test', { skillId: skillUuid, source: 'cursor-extension' });
       const res = result as any;
       const total = (res?.passed || 0) + (res?.failed || 0) + (res?.skipped || 0);
@@ -1774,7 +1894,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const toVersion = await vscode.window.showInputBox({ prompt: 'To version (or "current")', value: 'current', ignoreFocusOut: true });
     if (!toVersion) return;
     try {
-      const skillUuid = await ensureSkillUuid(mcpUrl, apiKey, target, log);
+      const skillUuid = await ensureSkillSyncedForMcp(mcpUrl, apiKey, workspaceRoot, target, log);
       const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId: skillUuid, versionA: fromVersion, versionB: toVersion, source: 'cursor-extension' });
       const diffText = (diffResult as any)?.diff || 'No diff available.';
       const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
