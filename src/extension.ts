@@ -7,7 +7,7 @@ import { createClient } from '@supabase/supabase-js';
 import { runSignIn } from './device-auth';
 import { ensureUsableApiKey } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
-import { getCtx, api, ApiCtx } from './api';
+import { getCtx, api, ApiCtx, setToken, clearToken } from './api';
 import { isSkillFile } from './skillDetect';
 import { SkillCodeLensProvider } from './skill-lens';
 
@@ -27,6 +27,7 @@ const WATCH_ROOTS = [
   '.kiro/skills/',
   '.cursor/rules/',
   '.claude/',
+  '.agents/skills/',
 ];
 
 const SELF_WRITE_SUPPRESS_MS = 30_000;
@@ -231,8 +232,16 @@ function sourceIdeFromPath(workspaceRoot: string, fsPath: string, fallback: stri
   if (rel.startsWith('.cursor/')) return 'cursor';
   if (rel.startsWith('.kiro/')) return 'kiro';
   if (rel.startsWith('.claude/')) return 'claude';
+  if (rel.startsWith('.agents/')) return 'agents';
   if (rel.startsWith('.modelbound/')) return 'modelbound';
   return fallback;
+}
+
+function skillIdFromPath(workspaceRoot: string, fsPath: string): string {
+  const rel = relPath(workspaceRoot, fsPath);
+  const nativeSkillFile = rel.match(/^(?:\.agents\/skills|\.kiro\/skills|\.claude\/skills)\/([^/]+)\/SKILL\.md$/);
+  if (nativeSkillFile) return nativeSkillFile[1];
+  return path.basename(fsPath, path.extname(fsPath));
 }
 
 function markSelfWrite(fsPath: string): void {
@@ -435,6 +444,12 @@ function getSkillOutputPaths(workspaceRoot: string, skillId: string): string[] {
     paths.push(path.join(kiroSkills, `${skillId}.md`));
   }
 
+  const agentsDir = path.join(workspaceRoot, '.agents', 'skills', skillId);
+  if (fs.existsSync(path.join(workspaceRoot, '.agents'))) {
+    fs.mkdirSync(agentsDir, { recursive: true });
+    paths.push(path.join(agentsDir, 'SKILL.md'));
+  }
+
   const cursorDir = path.join(workspaceRoot, '.cursor');
   if (fs.existsSync(cursorDir)) {
     const cursorRules = path.join(cursorDir, 'rules');
@@ -534,7 +549,32 @@ export async function activate(context: vscode.ExtensionContext) {
   const workspaceRoot = workspaceFolder.uri.fsPath;
 
   const config = vscode.workspace.getConfiguration('modelbound');
-  let apiKey = config.get<string>('apiKey');
+  const getConfiguredApiKey = (): string | undefined => {
+    const modelboundConfig = vscode.workspace.getConfiguration('modelbound');
+    const sectionValue = modelboundConfig.get<string>('apiKey');
+    if (sectionValue?.trim()) return sectionValue.trim();
+
+    const rootValue = vscode.workspace.getConfiguration().get<string>('modelbound.apiKey');
+    if (rootValue?.trim()) return rootValue.trim();
+
+    const inspected = vscode.workspace.getConfiguration().inspect<string>('modelbound.apiKey');
+    for (const value of [
+      inspected?.workspaceFolderValue,
+      inspected?.workspaceValue,
+      inspected?.globalValue,
+      inspected?.defaultValue,
+    ]) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return undefined;
+  };
+  const getEffectiveApiKey = async (): Promise<string | undefined> => {
+    const configured = getConfiguredApiKey();
+    if (configured) return configured;
+    const ctx = await getCtx(context.secrets);
+    return ctx.token?.trim() || undefined;
+  };
+  let apiKey = getConfiguredApiKey();
   const autoSync = config.get<boolean>('autoSync', true);
   const mcpUrl =
     config.get<string>('mcpUrl') || 'https://mcp.modelbound.co';
@@ -551,7 +591,8 @@ export async function activate(context: vscode.ExtensionContext) {
     if (action === 'Sign In with Browser') {
       try {
         const email = await runSignIn();
-        const fresh = vscode.workspace.getConfiguration('modelbound').get<string>('apiKey');
+        const fresh = getConfiguredApiKey();
+        apiKey = fresh;
         vscode.window.showInformationMessage(
           email ? `ModelBound: Signed in as ${email}.` : 'ModelBound: Signed in successfully.',
         );
@@ -571,14 +612,16 @@ export async function activate(context: vscode.ExtensionContext) {
       });
       if (input) {
         await config.update('apiKey', input, vscode.ConfigurationTarget.Global);
+        apiKey = input.trim();
+        await setToken(context.secrets, apiKey);
         vscode.window.showInformationMessage('ModelBound: API key saved.');
-        return input;
+        return apiKey;
       }
     }
     return undefined;
   };
 
-  apiKey = await ensureUsableApiKey({
+  void ensureUsableApiKey({
     mcpUrl,
     storedKey: apiKey,
     log,
@@ -586,13 +629,20 @@ export async function activate(context: vscode.ExtensionContext) {
       await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
     },
     promptSignIn,
-  });
+  })
+    .then((usableKey) => {
+      apiKey = usableKey;
+      log(`Auth ${apiKey ? 'ready' : 'not configured'} after startup validation.`);
+    })
+    .catch((err) => {
+      log(`Auth validation failed during startup: ${(err as Error).message ?? String(err)}`);
+    });
 
   // 0a. Status bar & CodeLens for pipeline/versions/health
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-  statusBarItem.text = '$(symbol-misc) ModelBound';
-  statusBarItem.command = 'modelbound.runSkillPipeline';
-  statusBarItem.tooltip = 'ModelBound — click to run Skill Development Pipeline';
+  statusBarItem.text = '$(sync) ModelBound Sync';
+  statusBarItem.command = 'modelbound.syncCurrentFile';
+  statusBarItem.tooltip = 'ModelBound — sync the current skill/context file';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
   const statusBar = { dispose: () => statusBarItem.dispose() };
@@ -603,47 +653,156 @@ export async function activate(context: vscode.ExtensionContext) {
   const localFolder = path.join(workspaceRoot, '.modelbound');
   if (!fs.existsSync(localFolder)) fs.mkdirSync(localFolder, { recursive: true });
 
-  // 2. Set up file watchers (add/change/delete) for every glob
-  if (autoSync && apiKey) {
-    const ide = detectIde();
-    const initial = getRepoInfo(workspaceRoot);
-    log(`Activated. ide=${ide} workspace=${workspaceRoot} repo=${initial.repoUrl ?? 'none'} branch=${initial.branch ?? 'none'}`);
-    if (!initial.repoUrl) {
-      vscode.window.showInformationMessage(
-        'ModelBound: no git remote detected — skills will sync without repo association. Run "git remote add origin <url>" and save a skill to re-detect. See the ModelBound output channel for details.'
-      );
+  const ide = detectIde();
+  log(`Activated. ide=${ide} workspace=${workspaceRoot} autoSync=${autoSync ? 'on' : 'off'} signedIn=${apiKey ? 'yes' : 'no'}`);
+  const configListener = vscode.workspace.onDidChangeConfiguration(async (event) => {
+    if (!event.affectsConfiguration('modelbound.apiKey')) return;
+    apiKey = await getEffectiveApiKey();
+    log(`Configuration changed: ModelBound API key is ${apiKey ? 'available' : 'not configured'}.`);
+  });
+  context.subscriptions.push(configListener);
+
+  const isModelBoundErrorContent = (content: string): boolean => {
+    const normalized = content.trim().toLowerCase();
+    return (
+      /^skill not found\b/.test(normalized) ||
+      /^not found\b/.test(normalized) ||
+      /^error[:\s]/.test(normalized)
+    );
+  };
+
+  const fetchSkillFromCloud = async (skillId: string, activeApiKey: string): Promise<{ content: string; id: string; slug: string | null }> => {
+    const data = await callMcpTool(mcpUrl, activeApiKey, 'skills.get', {
+      file_id: skillId,
+      skill_id: skillId,
+    });
+    const content: string =
+      (data && typeof data === 'object' && 'text' in data && typeof (data as any).text === 'string'
+        ? (data as any).text
+        : typeof data === 'string'
+          ? data
+          : '') || '';
+    if (!content || isModelBoundErrorContent(content)) {
+      throw new Error('ModelBound did not return a usable cloud copy for this skill.');
+    }
+    const id = data && typeof data === 'object' ? (data as any).skill_id ?? (data as any).id ?? skillId : skillId;
+    const slug = data && typeof data === 'object' ? (data as any).slug ?? null : null;
+    return { content, id, slug };
+  };
+
+  const writeCloudSkillToPath = (cloud: { content: string; id: string; slug: string | null }, destPath: string): void => {
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    markSelfWrite(destPath);
+    fs.writeFileSync(destPath, cloud.content, 'utf8');
+    registerSkill(cloud.id, cloud.slug, destPath);
+  };
+
+  const handleProtectedSyncRejection = async (
+    message: string,
+    localUri: vscode.Uri,
+    localSkillId: string,
+    activeApiKey: string,
+  ): Promise<boolean> => {
+    if (!message.includes('Refusing to write skill body_md')) return false;
+    const rejectedSkillId = message.match(/skill_id=([^) ,]+)/)?.[1] || localSkillId;
+    const relativePath = relPath(workspaceRoot, localUri.fsPath);
+    log(`Protected sync rejection for ${relativePath}; cloud skill=${rejectedSkillId}`);
+
+    const pick = await vscode.window.showWarningMessage(
+      `ModelBound rejected "${relativePath}" because the local file looks like an error response. Compare with the cloud copy before choosing what to keep.`,
+      { modal: false },
+      'Compare with Cloud',
+      'Pull Cloud Version',
+      'Open in ModelBound',
+      'Stop',
+    );
+
+    if (!pick || pick === 'Stop') return true;
+    if (pick === 'Open in ModelBound') {
+      vscode.env.openExternal(vscode.Uri.parse(`https://modelbound.co/skills/${rejectedSkillId}`));
+      return true;
     }
 
-    const syncFileNow = async (uri: vscode.Uri) => {
-      const filePath = uri.fsPath;
-      if (!isWatchablePath(workspaceRoot, filePath)) return;
-      if (shouldSuppressSelfWrite(filePath)) {
-        log(`Skipped self-originated sync for ${relPath(workspaceRoot, filePath)}`);
-        return;
-      }
-      const pathKey = path.resolve(filePath);
-      if (inFlightPathSyncs.has(pathKey)) {
-        log(`Skipped already-running sync for ${relPath(workspaceRoot, filePath)}`);
-        return;
-      }
-      const skillId = path.basename(filePath, path.extname(filePath));
-      inFlightPathSyncs.add(pathKey);
-      vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
-      try {
-        const content = fs.readFileSync(filePath, 'utf8');
-        const { repoUrl, branch } = getRepoInfo(workspaceRoot);
-        const relativePath = relPath(workspaceRoot, filePath);
-        const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
-        const syncResult = await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
-          tool_name: 'skills.syncFromIde',
-          arguments: {
-            repo_url: repoUrl,
-            branch,
-            source_ide: sourceIdeName,
-            source_path: relativePath,
-            body_md: content,
-          },
+    try {
+      const cloud = await fetchSkillFromCloud(rejectedSkillId, activeApiKey);
+      if (pick === 'Compare with Cloud') {
+        const doc = await vscode.workspace.openTextDocument({
+          content: cloud.content,
+          language: 'markdown',
         });
+        await vscode.commands.executeCommand(
+          'vscode.diff',
+          doc.uri,
+          localUri,
+          `ModelBound cloud ↔ ${relativePath}`,
+        );
+        const afterCompare = await vscode.window.showWarningMessage(
+          `Compared cloud copy with ${relativePath}.`,
+          { modal: false },
+          'Pull Cloud Version',
+          'Keep Local for Now',
+        );
+        if (afterCompare !== 'Pull Cloud Version') return true;
+      }
+
+      writeCloudSkillToPath(cloud, localUri.fsPath);
+      vscode.window.setStatusBarMessage(`$(cloud-download) ModelBound: Pulled cloud version for ${localSkillId}`, 3000);
+      vscode.window.showInformationMessage(`ModelBound: restored ${relativePath} from the cloud copy.`);
+      return true;
+    } catch (cloudErr) {
+      const cloudMsg = cloudErr instanceof Error ? cloudErr.message : String(cloudErr);
+      log(`Unable to recover ${relativePath} from cloud: ${cloudMsg}`);
+      vscode.window.showErrorMessage(
+        `ModelBound could not find a usable cloud copy for ${localSkillId}. You can recreate the skill or keep editing locally.`
+      );
+      return true;
+    }
+  };
+
+  const syncFileNow = async (uri: vscode.Uri, manual = false) => {
+    const filePath = uri.fsPath;
+    const relativePath = relPath(workspaceRoot, filePath);
+    if (!isWatchablePath(workspaceRoot, filePath)) {
+      log(`Ignored ${manual ? 'manual sync' : 'save'} for non-watchable path ${relativePath}`);
+      if (manual) {
+        vscode.window.showWarningMessage(`ModelBound: ${relativePath} is not in a watched context directory.`);
+      }
+      return;
+    }
+    const activeApiKey = apiKey || await getEffectiveApiKey();
+    if (!activeApiKey) {
+      log(`Skipped sync for ${relativePath}: not signed in.`);
+      vscode.window.showWarningMessage('ModelBound: Sign in or set an API key before syncing.');
+      return;
+    }
+    apiKey = activeApiKey;
+    if (shouldSuppressSelfWrite(filePath)) {
+      log(`Skipped self-originated sync for ${relativePath}`);
+      return;
+    }
+    const pathKey = path.resolve(filePath);
+    if (inFlightPathSyncs.has(pathKey)) {
+      log(`Skipped already-running sync for ${relativePath}`);
+      return;
+    }
+    const skillId = skillIdFromPath(workspaceRoot, filePath);
+    inFlightPathSyncs.add(pathKey);
+    vscode.window.setStatusBarMessage(`$(sync~spin) ModelBound: Syncing ${skillId}...`);
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const { repoUrl, branch } = getRepoInfo(workspaceRoot);
+      const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
+      log(`Syncing ${relativePath} → ModelBound (source=${sourceIdeName}, repo=${repoUrl ?? 'none'}, branch=${branch ?? 'none'})`);
+      const syncResult = await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
+        tool_name: 'skills.syncFromIde',
+        arguments: {
+          repo_url: repoUrl,
+          branch,
+          source_ide: sourceIdeName,
+          source_path: relativePath,
+          body_md: content,
+        },
+      });
 
         // Server returns a JSON-encoded action payload. Handle conflict locally
         // by offering the user an in-IDE force-resolve, rather than just dying.
@@ -660,7 +819,7 @@ export async function activate(context: vscode.ExtensionContext) {
           );
           if (pick === 'Keep my IDE version' && conflictSkillId) {
             try {
-              await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+              await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
                 tool_name: 'skills.resolveConflict',
                 arguments: {
                   skill_id: conflictSkillId,
@@ -678,7 +837,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
           } else if (pick === 'Use ModelBound version' && conflictSkillId) {
             try {
-              await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
+              await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
                 tool_name: 'skills.resolveConflict',
                 arguments: {
                   skill_id: conflictSkillId,
@@ -706,43 +865,68 @@ export async function activate(context: vscode.ExtensionContext) {
         registerSkill(returnedId, returnedSlug, filePath);
         log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} action=${(syncResult as any)?.action ?? 'updated'}`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`Sync failed for ${skillId}: ${msg}`);
-        vscode.window.showErrorMessage(`ModelBound sync failed for ${skillId}: ${msg}`);
-      } finally {
-        inFlightPathSyncs.delete(pathKey);
-      }
-    };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`Sync failed for ${skillId}: ${msg}`);
+      if (await handleProtectedSyncRejection(msg, uri, skillId, activeApiKey)) return;
+      vscode.window.showErrorMessage(`ModelBound sync failed for ${skillId}: ${msg}`);
+    } finally {
+      inFlightPathSyncs.delete(pathKey);
+    }
+  };
 
-    const syncFile = (uri: vscode.Uri) => {
-      const filePath = uri.fsPath;
-      if (!isWatchablePath(workspaceRoot, filePath)) return;
-      scheduleDebounced(`sync:${path.resolve(filePath)}`, () => {
-        syncFileNow(uri).catch((err) => log(`Unhandled sync error: ${(err as Error).message ?? String(err)}`));
+  const syncFile = (uri: vscode.Uri) => {
+    const filePath = uri.fsPath;
+    const relativePath = relPath(workspaceRoot, filePath);
+    if (!isWatchablePath(workspaceRoot, filePath)) return;
+    if (!autoSync) {
+      log(`Skipped auto-sync for ${relativePath}: modelbound.autoSync is off.`);
+      return;
+    }
+    log(`Queued auto-sync for ${relativePath}`);
+    scheduleDebounced(`sync:${path.resolve(filePath)}`, () => {
+      syncFileNow(uri).catch((err) => log(`Unhandled sync error: ${(err as Error).message ?? String(err)}`));
+    });
+  };
+
+  const deleteFile = async (uri: vscode.Uri) => {
+    const filePath = uri.fsPath;
+    const relativePath = relPath(workspaceRoot, filePath);
+    if (!isWatchablePath(workspaceRoot, filePath)) return;
+    if (!autoSync) {
+      log(`Skipped delete sync for ${relativePath}: modelbound.autoSync is off.`);
+      return;
+    }
+    const activeApiKey = apiKey || await getEffectiveApiKey();
+    if (!activeApiKey) {
+      log(`Skipped delete sync for ${relativePath}: not signed in.`);
+      vscode.window.showWarningMessage('ModelBound: Sign in or set an API key before syncing deletes.');
+      return;
+    }
+    apiKey = activeApiKey;
+    const skillId = skillIdFromPath(workspaceRoot, filePath);
+    try {
+      const { repoUrl } = getRepoInfo(workspaceRoot);
+      log(`Deleting ${relativePath} from ModelBound (repo=${repoUrl ?? 'none'})`);
+      await callMcpTool(mcpUrl, activeApiKey, 'modelbound.callTool', {
+        tool_name: 'skills.deleteFromIde',
+        arguments: {
+          repo_url: repoUrl,
+          source_path: relativePath,
+        },
       });
-    };
+      vscode.window.setStatusBarMessage(`$(trash) ModelBound: Removed ${skillId}`, 3000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`Delete failed for ${skillId}: ${msg}`);
+      vscode.window.showErrorMessage(`ModelBound delete failed for ${skillId}: ${msg}`);
+    }
+  };
 
-    const deleteFile = async (uri: vscode.Uri) => {
-      const filePath = uri.fsPath;
-      const skillId = path.basename(filePath, path.extname(filePath));
-      try {
-        const { repoUrl } = getRepoInfo(workspaceRoot);
-        await callMcpTool(mcpUrl, apiKey!, 'modelbound.callTool', {
-          tool_name: 'skills.deleteFromIde',
-          arguments: {
-            repo_url: repoUrl,
-            source_path: relPath(workspaceRoot, filePath),
-          },
-        });
-        vscode.window.setStatusBarMessage(`$(trash) ModelBound: Removed ${skillId}`, 3000);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`Delete failed for ${skillId}: ${msg}`);
-        vscode.window.showErrorMessage(`ModelBound delete failed for ${skillId}: ${msg}`);
-      }
-    };
-
+  // 2. Set up file watchers (add/change/delete) for every glob. Keep them
+  // registered even when auth is missing so users get a visible reason instead
+  // of silent no-ops when editing watched files.
+  if (autoSync) {
     for (const glob of WATCH_GLOBS) {
       const pattern = new vscode.RelativePattern(workspaceFolder, glob);
       const watcher = vscode.workspace.createFileSystemWatcher(pattern);
@@ -752,12 +936,15 @@ export async function activate(context: vscode.ExtensionContext) {
       watchers.push(watcher);
       context.subscriptions.push(watcher);
     }
-
-    const saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (doc.uri.scheme === 'file') syncFile(doc.uri);
-    });
-    context.subscriptions.push(saveListener);
+    log(`Watching ${WATCH_GLOBS.length} ModelBound glob(s).`);
+  } else {
+    log('Auto-sync is disabled; file watchers were not started.');
   }
+
+  const saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
+    if (doc.uri.scheme === 'file') syncFile(doc.uri);
+  });
+  context.subscriptions.push(saveListener);
 
   // Reusable: fetch a skill from MCP and write it to every relevant local
   // location. Used by both the manual pull command and the realtime watcher.
@@ -775,6 +962,9 @@ export async function activate(context: vscode.ExtensionContext) {
           ? data
           : '') || '';
     if (!content) throw new Error('Skill not found or empty');
+    if (isModelBoundErrorContent(content)) {
+      throw new Error(`ModelBound returned error content for "${skillId}", so it was not written locally.`);
+    }
 
     const returnedSlug = data && typeof data === 'object' ? (data as any).slug ?? null : null;
     const returnedId = data && typeof data === 'object' ? (data as any).skill_id ?? (data as any).id ?? skillId : skillId;
@@ -814,6 +1004,15 @@ export async function activate(context: vscode.ExtensionContext) {
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showErrorMessage(`Failed to pull context: ${msg}`);
     }
+  });
+
+  const syncCurrentFileCommand = vscode.commands.registerCommand('modelbound.syncCurrentFile', async () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.scheme !== 'file') {
+      vscode.window.showWarningMessage('ModelBound: open a local skill/context file to sync.');
+      return;
+    }
+    await syncFileNow(editor.document.uri, true);
   });
 
   // 3b. Realtime push — subscribe to Supabase Realtime so cloud edits land in
@@ -932,8 +1131,10 @@ export async function activate(context: vscode.ExtensionContext) {
     if (input) {
       const cfg = vscode.workspace.getConfiguration('modelbound');
       await cfg.update('apiKey', input, vscode.ConfigurationTarget.Global);
+      apiKey = input.trim();
+      await setToken(context.secrets, apiKey);
       vscode.window.showInformationMessage(
-        'ModelBound: API key updated. Reload window to apply.'
+        'ModelBound: API key updated. Sync is ready.'
       );
     }
   });
@@ -1056,12 +1257,11 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     try {
       const email = await runSignIn();
+      apiKey = await getEffectiveApiKey();
+      if (apiKey) await setToken(context.secrets, apiKey);
       vscode.window.showInformationMessage(
-        email ? `ModelBound: Signed in as ${email}. Reload window to start syncing.` : 'ModelBound: Signed in. Reload window to start syncing.',
-        'Reload Window',
-      ).then((choice) => {
-        if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
-      });
+        email ? `ModelBound: Signed in as ${email}. Sync is ready.` : 'ModelBound: Signed in. Sync is ready.',
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`Sign-in failed: ${msg}`);
@@ -1072,6 +1272,8 @@ export async function activate(context: vscode.ExtensionContext) {
   const signOutCommand = vscode.commands.registerCommand('modelbound.signOut', async () => {
     const cfg = vscode.workspace.getConfiguration('modelbound');
     await cfg.update('apiKey', '', vscode.ConfigurationTarget.Global);
+    await clearToken(context.secrets);
+    apiKey = undefined;
     vscode.window.showInformationMessage('ModelBound: Signed out. Reload window to stop syncing.');
   });
 
@@ -1205,8 +1407,9 @@ export async function activate(context: vscode.ExtensionContext) {
       if (!entered) return;
       skillId = entered.trim();
     }
+    const activeApiKey = apiKey;
     try {
-      const result = await callMcpTool(mcpUrl, apiKey, 'skill.versions', { skillId, source: 'cursor-extension' });
+      const result = await callMcpTool(mcpUrl, activeApiKey, 'skill.versions', { skillId, source: 'cursor-extension' });
       const versions = (result as any)?.versions || [];
       const panel = vscode.window.createWebviewPanel('modelboundVersions', `ModelBound Versions · ${skillId}`, vscode.ViewColumn.Beside, { enableScripts: true });
       const rows = versions.map((v: any) => `<tr><td><code>${(v.id || '').slice(0,10)}</code></td><td>${v.created_at || ''}</td><td>${v.tokens || ''}</td><td><button data-act="diff" data-v="${v.id}">Diff</button> <button data-act="restore" data-v="${v.id}">Restore</button></td></tr>`).join('');
@@ -1214,7 +1417,7 @@ export async function activate(context: vscode.ExtensionContext) {
       panel.webview.onDidReceiveMessage(async (msg) => {
         if (msg.type === 'restore' && msg.versionId) {
           try {
-            const restored = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
+            const restored = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId, versionA: msg.versionId, action: 'restore', source: 'cursor-extension' });
             const content = (restored as any)?.content || '';
             const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
             await vscode.window.showTextDocument(doc, { preview: false });
@@ -1225,7 +1428,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         if (msg.type === 'diff' && msg.versionId) {
           try {
-            const diffResult = await callMcpTool(mcpUrl, apiKey, 'skill.diff', { skillId, versionA: msg.versionId, versionB: 'current', source: 'cursor-extension' });
+            const diffResult = await callMcpTool(mcpUrl, activeApiKey, 'skill.diff', { skillId, versionA: msg.versionId, versionB: 'current', source: 'cursor-extension' });
             const diffText = (diffResult as any)?.diff || 'No diff available.';
             const doc = await vscode.workspace.openTextDocument({ content: diffText, language: 'diff' });
             await vscode.window.showTextDocument(doc, { preview: true });
@@ -1279,7 +1482,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  context.subscriptions.push(pullCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand, runTestCommand, showVersionsCommand, diffVersionsCommand, showHealthCommand, statusBar, { dispose: () => skillLens.refresh() });
+  context.subscriptions.push(pullCommand, syncCurrentFileCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand, runTestCommand, showVersionsCommand, diffVersionsCommand, showHealthCommand, statusBar, { dispose: () => skillLens.refresh() });
 }
 
 // Normalise the various shapes get_resource_tree may return into
