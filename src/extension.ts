@@ -9,6 +9,7 @@ import { RealtimeSync } from './realtime-sync';
 import { getCtx, api, ApiCtx, setToken, clearToken } from './api';
 import { isSkillFile } from './skillDetect';
 import { SkillCodeLensProvider } from './skill-lens';
+import { registerSkillTrustCommands } from './skill-trust';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -996,8 +997,21 @@ export async function activate(context: vscode.ExtensionContext) {
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
   const statusBar = { dispose: () => statusBarItem.dispose() };
-  const skillLens = new SkillCodeLensProvider(apiKey || '', mcpUrl);
-  vscode.languages.registerCodeLensProvider({ pattern: '**/SKILL.md' }, skillLens);
+  const skillLens = new SkillCodeLensProvider(apiKey || '', mcpUrl, (document) => {
+    const target = resolveSkillFromPath(workspaceRoot, document.uri.fsPath);
+    return target ? { skillId: target.skillId, label: target.label } : null;
+  });
+  const codeLensSelector: vscode.DocumentSelector = [
+    { pattern: '**/.modelbound/**/*.md' },
+    { pattern: '**/.modelbound/**/*.json' },
+    { pattern: '**/.kiro/skills/**/*.md' },
+    { pattern: '**/.cursor/rules/**/*.md' },
+    { pattern: '**/.cursor/rules/**/*.mdc' },
+    { pattern: '**/.claude/**/*.md' },
+    { pattern: '**/.agents/skills/**/SKILL.md' },
+    { pattern: '**/SKILL.md' },
+  ];
+  vscode.languages.registerCodeLensProvider(codeLensSelector, skillLens);
 
   // 1. Ensure canonical .modelbound/ exists
   const localFolder = path.join(workspaceRoot, '.modelbound');
@@ -1006,8 +1020,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const ide = detectIde();
   log(`Activated. ide=${ide} workspace=${workspaceRoot} autoSync=${autoSync ? 'on' : 'off'} signedIn=${apiKey ? 'yes' : 'no'}`);
   const configListener = vscode.workspace.onDidChangeConfiguration(async (event) => {
-    if (!event.affectsConfiguration('modelbound.apiKey')) return;
+    if (!event.affectsConfiguration('modelbound.apiKey') && !event.affectsConfiguration('modelbound.mcpUrl')) return;
     apiKey = await resolveActiveApiKey();
+    skillLens.setAuth(apiKey || '', mcpUrl);
     log(`Configuration changed: ModelBound API key is ${apiKey ? 'available' : 'not configured'}.`);
     restartCloudPullWatcher?.();
   });
@@ -1919,6 +1934,20 @@ export async function activate(context: vscode.ExtensionContext) {
     } catch (err) {
       vscode.window.showErrorMessage(`Health check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  });
+
+  registerSkillTrustCommands(context, {
+    getApiKey: () => apiKey,
+    getMcpUrl: () => mcpUrl,
+    workspaceRoot,
+    pickSkillTarget,
+    ensureSkillUuid,
+    ensureSkillSynced: ensureSkillSyncedForMcp,
+    callMcp: (name, args) => {
+      if (!apiKey) throw new Error('ModelBound API key is not configured.');
+      return callMcpTool(mcpUrl, apiKey, name, args);
+    },
+    log,
   });
 
   context.subscriptions.push(pullCommand, syncCurrentFileCommand, setKeyCommand, runPipelineCommand, signInCommand, signOutCommand, browseTreeCommand, filterSkillsCommand, runTestCommand, showVersionsCommand, diffVersionsCommand, showHealthCommand, statusBar, { dispose: () => skillLens.refresh() });

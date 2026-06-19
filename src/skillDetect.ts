@@ -14,8 +14,11 @@ export function getSkillGlobs(): string[] {
 export function isSkillFile(uri: vscode.Uri | undefined): boolean {
   if (!uri || uri.scheme !== "file") return false;
   const rel = vscode.workspace.asRelativePath(uri, false);
-  // Quick path-based heuristic so we don't pay a glob match on every selection change.
   const base = path.basename(rel);
   if (base === "SKILL.md") return true;
+  if (/^\.modelbound\/[^/]+\.(md|json)$/i.test(rel)) return true;
+  if (/^\.kiro\/skills\/[^/]+\.md$/i.test(rel)) return true;
+  if (/^\.cursor\/rules\/[^/]+\.(md|mdc)$/i.test(rel)) return true;
+  if (/^\.claude\/[^/]+\.md$/i.test(rel)) return true;
   return /(^|\/)(skills|\.cursor\/skills|\.agents\/skills|\.workspace\/skills)\//.test(rel);
 }

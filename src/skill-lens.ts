@@ -1,5 +1,13 @@
-// Skill CodeLens provider — shows version count, score, and quick actions on SKILL.md files.
+// Skill CodeLens provider — trust score, versions, and Test & Optimize quick actions.
 import * as vscode from 'vscode';
+import { isSkillFile } from './skillDetect';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type SkillLensTarget = {
+  skillId: string;
+  label: string;
+};
 
 export class SkillCodeLensProvider implements vscode.CodeLensProvider {
   private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
@@ -7,68 +15,83 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
 
   private apiKey: string;
   private mcpUrl: string;
-  private cache = new Map<string, { versions: number; score?: number; ts: number }>();
+  private resolveTarget: (document: vscode.TextDocument) => SkillLensTarget | null;
+  private cache = new Map<string, { trust?: number; critical?: number; ts: number }>();
   private cacheTtlMs = 60_000;
 
-  constructor(apiKey: string, mcpUrl: string) {
+  constructor(
+    apiKey: string,
+    mcpUrl: string,
+    resolveTarget: (document: vscode.TextDocument) => SkillLensTarget | null,
+  ) {
     this.apiKey = apiKey;
     this.mcpUrl = mcpUrl;
+    this.resolveTarget = resolveTarget;
+  }
+
+  setAuth(apiKey: string, mcpUrl: string): void {
+    this.apiKey = apiKey;
+    this.mcpUrl = mcpUrl;
+    this.cache.clear();
+    this._onDidChangeCodeLenses.fire();
   }
 
   refresh(): void {
+    this.cache.clear();
     this._onDidChangeCodeLenses.fire();
   }
 
   provideCodeLenses(document: vscode.TextDocument, _token: vscode.CancellationToken): vscode.CodeLens[] {
-    const fileName = document.fileName;
-    if (!fileName.endsWith('SKILL.md')) return [];
+    if (!isSkillFile(document.uri)) return [];
 
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-    const skillId = this.inferSkillId(document, workspaceRoot);
-    if (!skillId) return [];
+    const target = this.resolveTarget(document);
+    if (!target) return [];
 
-    const cached = this.cache.get(skillId);
+    const cached = this.cache.get(target.skillId);
+    const headerLine = this.findHeaderLine(document);
     const lenses: vscode.CodeLens[] = [];
+    const range = new vscode.Range(headerLine, 0, headerLine, 0);
 
-    // Header lens — version count & score
-    const headerLine = this.findFrontmatterEnd(document);
-    const scoreText = cached?.score != null ? ` · score ${cached.score}/100` : '';
-    const versionsText = cached ? `📦 ${cached.versions} version${cached.versions === 1 ? '' : 's'}${scoreText}` : 'ModelBound: loading…';
+    const trustText =
+      cached?.trust != null
+        ? `$(shield) Trust ${cached.trust}/100${cached.critical ? ` · ${cached.critical} critical` : ''}`
+        : '$(shield) Trust & Safety';
     lenses.push(
-      new vscode.CodeLens(new vscode.Range(headerLine, 0, headerLine, 0), {
-        title: versionsText,
-        command: 'modelbound.showSkillVersions',
-        arguments: [skillId],
-      })
+      new vscode.CodeLens(range, {
+        title: trustText,
+        command: 'modelbound.showSkillFindings',
+        arguments: [target.skillId],
+      }),
     );
 
-    // Quick action lenses
     lenses.push(
-      new vscode.CodeLens(new vscode.Range(headerLine, 0, headerLine, 0), {
+      new vscode.CodeLens(range, {
         title: '$(rocket) Pipeline',
         command: 'modelbound.runSkillPipeline',
-        arguments: [skillId],
+        arguments: [target.skillId],
       }),
-      new vscode.CodeLens(new vscode.Range(headerLine, 0, headerLine, 0), {
-        title: '$(debug-start) Test',
-        command: 'modelbound.runSkillTest',
-        arguments: [skillId],
-      })
+      new vscode.CodeLens(range, {
+        title: '$(pulse) Benchmark',
+        command: 'modelbound.benchmarkSkill',
+        arguments: [target.skillId],
+      }),
+      new vscode.CodeLens(range, {
+        title: '$(lightbulb) Suggest',
+        command: 'modelbound.suggestSkillImprovements',
+        arguments: [target.skillId],
+      }),
+      new vscode.CodeLens(range, {
+        title: '$(versions) Versions',
+        command: 'modelbound.showSkillVersions',
+        arguments: [target.skillId],
+      }),
     );
 
-    this.fetchAsync(skillId);
+    this.fetchAsync(target.skillId);
     return lenses;
   }
 
-  private inferSkillId(document: vscode.TextDocument, workspaceRoot: string): string | null {
-    const rel = vscode.workspace.asRelativePath(document.uri);
-    const agents = rel.match(/^\.agents\/skills\/([^/]+)\/SKILL\.md$/);
-    if (agents) return agents[1];
-    const basename = rel.split('/').pop()?.replace(/\.md$/, '') ?? '';
-    return basename || null;
-  }
-
-  private findFrontmatterEnd(document: vscode.TextDocument): number {
+  private findHeaderLine(document: vscode.TextDocument): number {
     if (document.lineAt(0).text !== '---') return 0;
     for (let i = 1; i < Math.min(document.lineCount, 40); i++) {
       if (document.lineAt(i).text === '---') return i + 1;
@@ -77,8 +100,10 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
   }
 
   private async fetchAsync(skillId: string): Promise<void> {
+    if (!this.apiKey || !UUID_RE.test(skillId)) return;
     const cached = this.cache.get(skillId);
     if (cached && Date.now() - cached.ts < this.cacheTtlMs) return;
+
     try {
       const res = await fetch(this.mcpUrl, {
         method: 'POST',
@@ -91,19 +116,27 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
           jsonrpc: '2.0',
           id: Date.now(),
           method: 'tools/call',
-          params: { name: 'skill.versions', arguments: { skillId, source: 'cursor-extension' } },
+          params: { name: 'list_skill_findings', arguments: { skill_id: skillId } },
         }),
       });
       if (!res.ok) return;
       const body = await res.text();
       let parsed: any = null;
-      try { parsed = JSON.parse(body); } catch { return; }
-      const result = parsed?.result?.structuredContent ?? null;
-      if (!result?.versions) return;
-      const versions = result.versions as Array<{ score?: number }>;
-      const score = versions[0]?.score;
-      this.cache.set(skillId, { versions: versions.length, score, ts: Date.now() });
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        const line = body.split('\n').filter((l) => l.startsWith('data:')).pop()?.slice(5).trim();
+        if (line) parsed = JSON.parse(line);
+      }
+      const payload = parsed?.result?.structuredContent;
+      if (!payload?.scores) return;
+      const critical = (payload.findings as Array<{ severity?: string; ignored?: boolean }> | undefined)?.filter(
+        (f) => !f.ignored && String(f.severity).toLowerCase() === 'critical',
+      ).length;
+      this.cache.set(skillId, { trust: payload.scores.total, critical, ts: Date.now() });
       this._onDidChangeCodeLenses.fire();
-    } catch { /* silent */ }
+    } catch {
+      /* silent */
+    }
   }
 }
