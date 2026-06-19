@@ -12,9 +12,14 @@ export interface ApiCtx {
 
 export async function getCtx(secrets: vscode.SecretStorage): Promise<ApiCtx> {
   const cfg = vscode.workspace.getConfiguration("modelbound");
+  const globalCfg = vscode.workspace.getConfiguration("modelbound", null);
+  const configToken =
+    globalCfg.get<string>("apiKey")?.trim() ||
+    cfg.get<string>("apiKey")?.trim() ||
+    undefined;
   return {
     baseUrl: (cfg.get<string>("apiUrl") || "https://modelbound.co").replace(/\/+$/, ""),
-    token: process.env.MODELBOUND_API_KEY || (await secrets.get(SECRET_KEY)) || undefined,
+    token: process.env.MODELBOUND_API_KEY?.trim() || configToken || (await secrets.get(SECRET_KEY)) || undefined,
   };
 }
 

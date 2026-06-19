@@ -106,32 +106,20 @@ export async function pollUntilApproved(
 }
 
 /**
- * Full sign-in convenience: start the flow, open the browser, poll, and
- * persist the resulting API key to the global config.
- *
- * Returns the user's email (when available) on success.
+ * Browser device-auth sign-in. Opens the approval URL immediately — the caller
+ * has already chosen "Sign in with Browser", so we skip a second confirmation.
  */
-export async function runSignIn(): Promise<string | null> {
+export async function runBrowserSignIn(log?: (msg: string) => void): Promise<{ apiKey: string; email: string | null }> {
   const deviceLabel = `${vscode.env.appName} on ${process.platform}`;
   const start = await startDeviceFlow(deviceLabel);
+  log?.(`Device auth started (code ${start.user_code})`);
 
-  const open = await vscode.window.showInformationMessage(
-    `ModelBound: Open browser to sign in?\nCode: ${start.user_code}`,
-    { modal: false },
-    'Open Browser',
-    'Copy Code',
-    'Cancel',
-  );
-  if (open === 'Cancel' || !open) throw new Error('Sign-in cancelled');
-  if (open === 'Copy Code') {
-    await vscode.env.clipboard.writeText(start.user_code);
-  }
   await vscode.env.openExternal(vscode.Uri.parse(start.verification_uri_complete));
 
   const result = await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: 'ModelBound: Waiting for browser sign-in...',
+      title: `ModelBound: Approve in browser · code ${start.user_code}`,
       cancellable: true,
     },
     (progress, token) => pollUntilApproved(start, progress, token),
@@ -139,5 +127,14 @@ export async function runSignIn(): Promise<string | null> {
 
   const cfg = vscode.workspace.getConfiguration('modelbound');
   await cfg.update('apiKey', result.api_key, vscode.ConfigurationTarget.Global);
-  return result.user_email;
+  return { apiKey: result.api_key, email: result.user_email };
+}
+
+/**
+ * Full sign-in convenience: browser flow + persist API key.
+ * Returns the user's email (when available) on success.
+ */
+export async function runSignIn(): Promise<string | null> {
+  const { email } = await runBrowserSignIn();
+  return email;
 }

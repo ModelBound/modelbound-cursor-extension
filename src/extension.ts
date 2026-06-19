@@ -4,8 +4,8 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { execSync } from 'child_process';
 import { createClient } from '@supabase/supabase-js';
-import { runSignIn } from './device-auth';
-import { ensureUsableApiKey } from './auth-validate';
+import { requestModelBoundCredentials } from './auth-flow';
+import { ensureUsableApiKey, isAuthFailureMessage, prepareSyncAuth, writeAuthCache } from './auth-validate';
 import { RealtimeSync } from './realtime-sync';
 import { getCtx, api, ApiCtx, setToken, clearToken } from './api';
 import { isSkillFile } from './skillDetect';
@@ -549,89 +549,115 @@ export async function activate(context: vscode.ExtensionContext) {
   const workspaceRoot = workspaceFolder.uri.fsPath;
 
   const config = vscode.workspace.getConfiguration('modelbound');
+  const workspaceFolderUri = workspaceFolder.uri;
+  const readConfigKey = (cfg: vscode.WorkspaceConfiguration): string | undefined => {
+    const value = cfg.get<string>('apiKey');
+    return value?.trim() ? value.trim() : undefined;
+  };
   const getConfiguredApiKey = (): string | undefined => {
-    const modelboundConfig = vscode.workspace.getConfiguration('modelbound');
-    const sectionValue = modelboundConfig.get<string>('apiKey');
-    if (sectionValue?.trim()) return sectionValue.trim();
+    // Read global first so an empty workspace override cannot hide a valid user key.
+    const globalKey = readConfigKey(vscode.workspace.getConfiguration('modelbound', null));
+    if (globalKey) return globalKey;
 
-    const rootValue = vscode.workspace.getConfiguration().get<string>('modelbound.apiKey');
-    if (rootValue?.trim()) return rootValue.trim();
+    const rootGlobal = vscode.workspace.getConfiguration(undefined, null).get<string>('modelbound.apiKey')?.trim();
+    if (rootGlobal) return rootGlobal;
 
-    const inspected = vscode.workspace.getConfiguration().inspect<string>('modelbound.apiKey');
-    for (const value of [
-      inspected?.workspaceFolderValue,
-      inspected?.workspaceValue,
-      inspected?.globalValue,
-      inspected?.defaultValue,
-    ]) {
+    const folderKey = readConfigKey(vscode.workspace.getConfiguration('modelbound', workspaceFolderUri));
+    if (folderKey) return folderKey;
+
+    const inspected = vscode.workspace.getConfiguration(undefined, null).inspect<string>('modelbound.apiKey');
+    for (const value of [inspected?.globalValue, inspected?.workspaceValue, inspected?.workspaceFolderValue]) {
       if (typeof value === 'string' && value.trim()) return value.trim();
     }
     return undefined;
   };
-  const getEffectiveApiKey = async (): Promise<string | undefined> => {
+  const resolveActiveApiKey = async (): Promise<string | undefined> => {
     const configured = getConfiguredApiKey();
-    if (configured) return configured;
+    if (configured) {
+      const stored = await context.secrets.get('modelbound.token');
+      if (stored !== configured) {
+        await setToken(context.secrets, configured);
+      }
+      return configured;
+    }
+    const secret = (await context.secrets.get('modelbound.token'))?.trim();
+    if (secret) return secret;
+    const env = process.env.MODELBOUND_API_KEY?.trim();
+    if (env) return env;
     const ctx = await getCtx(context.secrets);
     return ctx.token?.trim() || undefined;
   };
-  let apiKey = getConfiguredApiKey();
   const autoSync = config.get<boolean>('autoSync', true);
   const mcpUrl =
     config.get<string>('mcpUrl') || 'https://mcp.modelbound.co';
+  let apiKey: string | undefined = await resolveActiveApiKey();
 
-  // 0. Onboarding: validate any stored API key before prompting. Avoids
-  // re-prompting users on every reload when a valid key is already saved.
-  const promptSignIn = async (): Promise<string | undefined> => {
-    const action = await vscode.window.showInformationMessage(
-      'ModelBound: Sign in to start syncing your AI context, skills, and rules.',
-      'Sign In with Browser',
-      'Paste API Key',
-      'Later',
-    );
-    if (action === 'Sign In with Browser') {
-      try {
-        const email = await runSignIn();
-        const fresh = getConfiguredApiKey();
-        apiKey = fresh;
-        vscode.window.showInformationMessage(
-          email ? `ModelBound: Signed in as ${email}.` : 'ModelBound: Signed in successfully.',
-        );
-        return fresh;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`Sign-in failed: ${msg}`);
-        vscode.window.showErrorMessage(`ModelBound sign-in failed: ${msg}`);
-        return undefined;
-      }
-    } else if (action === 'Paste API Key') {
-      const input = await vscode.window.showInputBox({
-        prompt: 'Enter your ModelBound.co API Key',
-        placeHolder: 'mb_live_...',
-        password: true,
-        ignoreFocusOut: true,
-      });
-      if (input) {
-        await config.update('apiKey', input, vscode.ConfigurationTarget.Global);
-        apiKey = input.trim();
-        await setToken(context.secrets, apiKey);
-        vscode.window.showInformationMessage('ModelBound: API key saved.');
-        return apiKey;
-      }
+  const saveAuthKey = async (key: string) => {
+    apiKey = key;
+    await setToken(context.secrets, key);
+    await writeAuthCache(context.globalState, key);
+  };
+
+  const requireApiKeyForSync = async (source: string): Promise<string | undefined> => {
+    const resolved = await resolveActiveApiKey();
+    const auth = await prepareSyncAuth({
+      apiKey: resolved,
+      mcpUrl,
+      globalState: context.globalState,
+      log,
+    });
+    if (auth.ok) {
+      apiKey = auth.apiKey;
+      return auth.apiKey;
+    }
+    const reason = auth.reason === 'invalid' ? 'invalid' : 'missing';
+    log(`${source}: auth required (${reason}).`);
+    const key = await requestModelBoundCredentials({
+      reason,
+      log,
+      onKeySaved: saveAuthKey,
+    });
+    if (key) {
+      apiKey = key;
+      return key;
     }
     return undefined;
+  };
+
+  // 0. Onboarding: validate stored keys silently on startup. Only prompt when
+  // the user explicitly signs in or a sync/MCP call proves auth failed.
+  const promptSignIn = async (): Promise<string | undefined> =>
+    requestModelBoundCredentials({ reason: 'manual', log, onKeySaved: saveAuthKey });
+
+  const handleAuthFailure = async (source: string, message: string): Promise<boolean> => {
+    if (!isAuthFailureMessage(message)) return false;
+    log(`Auth failure during ${source}: ${message}`);
+    const key = await requestModelBoundCredentials({
+      reason: 'invalid',
+      log,
+      onKeySaved: saveAuthKey,
+    });
+    if (key) {
+      apiKey = key;
+      return true;
+    }
+    return false;
   };
 
   void ensureUsableApiKey({
     mcpUrl,
     storedKey: apiKey,
+    globalState: context.globalState,
+    interactive: false,
     log,
     clearStoredKey: async () => {
       await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
+      await clearToken(context.secrets);
     },
     promptSignIn,
   })
     .then((usableKey) => {
-      apiKey = usableKey;
+      apiKey = usableKey ?? apiKey;
       log(`Auth ${apiKey ? 'ready' : 'not configured'} after startup validation.`);
     })
     .catch((err) => {
@@ -657,7 +683,7 @@ export async function activate(context: vscode.ExtensionContext) {
   log(`Activated. ide=${ide} workspace=${workspaceRoot} autoSync=${autoSync ? 'on' : 'off'} signedIn=${apiKey ? 'yes' : 'no'}`);
   const configListener = vscode.workspace.onDidChangeConfiguration(async (event) => {
     if (!event.affectsConfiguration('modelbound.apiKey')) return;
-    apiKey = await getEffectiveApiKey();
+    apiKey = await resolveActiveApiKey();
     log(`Configuration changed: ModelBound API key is ${apiKey ? 'available' : 'not configured'}.`);
   });
   context.subscriptions.push(configListener);
@@ -769,13 +795,8 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       return;
     }
-    const activeApiKey = apiKey || await getEffectiveApiKey();
-    if (!activeApiKey) {
-      log(`Skipped sync for ${relativePath}: not signed in.`);
-      vscode.window.showWarningMessage('ModelBound: Sign in or set an API key before syncing.');
-      return;
-    }
-    apiKey = activeApiKey;
+    const activeApiKey = await requireApiKeyForSync(`sync ${relativePath}`);
+    if (!activeApiKey) return;
     if (shouldSuppressSelfWrite(filePath)) {
       log(`Skipped self-originated sync for ${relativePath}`);
       return;
@@ -863,12 +884,14 @@ export async function activate(context: vscode.ExtensionContext) {
         const returnedSlug = (syncResult as any)?.slug || skillId;
         markLocalPush(returnedId);
         registerSkill(returnedId, returnedSlug, filePath);
+        await writeAuthCache(context.globalState, activeApiKey);
         log(`Synced ${relativePath} → skill=${returnedId} slug=${returnedSlug} action=${(syncResult as any)?.action ?? 'updated'}`);
         vscode.window.setStatusBarMessage(`$(check) ModelBound: Synced ${skillId}`, 3000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`Sync failed for ${skillId}: ${msg}`);
       if (await handleProtectedSyncRejection(msg, uri, skillId, activeApiKey)) return;
+      if (await handleAuthFailure(`sync ${relativePath}`, msg)) return;
       vscode.window.showErrorMessage(`ModelBound sync failed for ${skillId}: ${msg}`);
     } finally {
       inFlightPathSyncs.delete(pathKey);
@@ -897,13 +920,8 @@ export async function activate(context: vscode.ExtensionContext) {
       log(`Skipped delete sync for ${relativePath}: modelbound.autoSync is off.`);
       return;
     }
-    const activeApiKey = apiKey || await getEffectiveApiKey();
-    if (!activeApiKey) {
-      log(`Skipped delete sync for ${relativePath}: not signed in.`);
-      vscode.window.showWarningMessage('ModelBound: Sign in or set an API key before syncing deletes.');
-      return;
-    }
-    apiKey = activeApiKey;
+    const activeApiKey = await requireApiKeyForSync(`delete ${relativePath}`);
+    if (!activeApiKey) return;
     const skillId = skillIdFromPath(workspaceRoot, filePath);
     try {
       const { repoUrl } = getRepoInfo(workspaceRoot);
@@ -1256,12 +1274,8 @@ export async function activate(context: vscode.ExtensionContext) {
       if (choice !== 'Sign In Again') return;
     }
     try {
-      const email = await runSignIn();
-      apiKey = await getEffectiveApiKey();
-      if (apiKey) await setToken(context.secrets, apiKey);
-      vscode.window.showInformationMessage(
-        email ? `ModelBound: Signed in as ${email}. Sync is ready.` : 'ModelBound: Signed in. Sync is ready.',
-      );
+      const key = await requestModelBoundCredentials({ reason: 'manual', log, onKeySaved: saveAuthKey });
+      if (key) apiKey = key;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`Sign-in failed: ${msg}`);
