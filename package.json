@@ -10,6 +10,7 @@
     "type": "git",
     "url": "https://github.com/ModelBound/modelbound-cursor-extension.git"
   },
+  "homepage": "https://marketplace.visualstudio.com/items?itemName=ModelBound.modelbound-cursor-extension",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -19,19 +20,21 @@
     "Other"
   ],
   "keywords": [
-    "cursor rules",
+    "cursor",
     "cursorrules",
-    "MCP",
-    "system prompt",
-    "AI context",
-    "Claude skills",
-    "prompt version control",
     "cursor rules sync",
-    "MCP server",
-    "AI rules manager",
+    "vscode-extension",
+    "modelbound",
+    "agent-skills",
+    "context-engineering",
+    "prompt-engineering",
+    "mcp",
+    "model-context-protocol",
+    "system prompt",
     "skill pipeline",
-    "CI/CD for prompts",
-    "agent CI"
+    "token optimization",
+    "ai agents",
+    "generative ai"
   ],
   "activationEvents": [
     "onStartupFinished"

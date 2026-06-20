@@ -1,0 +1,24 @@
+{
+  "description": "Cursor & VS Code extension — sync rules, skills, and system prompts with ModelBound. MCP bridge, version control, and Skill Development Pipeline.",
+  "homepage": "https://marketplace.visualstudio.com/items?itemName=ModelBound.modelbound-cursor-extension",
+  "topics": [
+    "ai",
+    "ai-agents",
+    "ai-tools",
+    "agent-skills",
+    "context-engineering",
+    "prompt-engineering",
+    "prompts",
+    "llm",
+    "generative-ai",
+    "artificial-intelligence",
+    "cursor",
+    "vscode-extension",
+    "vscode",
+    "mcp",
+    "model-context-protocol",
+    "extension",
+    "cursorrules",
+    "token-optimization"
+  ]
+}
