@@ -7,10 +7,18 @@ export type SyncDecisionInput = {
   hasPendingLocalEdit: boolean;
 };
 
+/** Normalize markdown bodies so IDE disk vs MCP fetch compare reliably. */
+export function normalizeSkillContent(content: string): string {
+  return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+$/, '\n');
+}
+
+export function skillContentMatches(a: string, b: string): boolean {
+  return normalizeSkillContent(a) === normalizeSkillContent(b);
+}
+
 /**
  * Decide whether to push, pull, or do nothing for a local skill file.
- * Does not account for server-side conflict flags — callers must compare content
- * with cloud before pushing even when this returns "push".
+ * Callers should hash normalized content before passing localHash/cloudHash.
  */
 export function decideSyncAction(input: SyncDecisionInput): SyncAction {
   const { localHash, cloudHash, lastSyncedHash, hasPendingLocalEdit } = input;
@@ -39,6 +47,6 @@ export function decideSyncAction(input: SyncDecisionInput): SyncAction {
   return 'push';
 }
 
-export function shouldTreatConflictAsSynced(localHash: string, cloudHash: string): boolean {
-  return localHash === cloudHash;
+export function shouldTreatConflictAsSynced(localContent: string, cloudContent: string): boolean {
+  return skillContentMatches(localContent, cloudContent);
 }

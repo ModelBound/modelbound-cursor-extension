@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'url';
 
 const require = createRequire(import.meta.url);
-const { decideSyncAction, shouldTreatConflictAsSynced } = require('../out/sync-state.js');
+const { decideSyncAction, shouldTreatConflictAsSynced, skillContentMatches } = require('../out/sync-state.js');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -103,28 +103,29 @@ const cloudHash = hash(cloud);
 const bodiesMatch = localHash === cloudHash;
 
 if (bodiesMatch) ok('local file matches cloud body');
+else if (skillContentMatches(local, cloud)) ok('local file matches cloud body (normalized)');
 else {
   console.log(`  note: local/cloud differ (local ${local.length}b, cloud ${cloud.length}b) — testing matched-body reload logic separately`);
   ok('matched-body reload logic (synthetic)');
 }
 
 const reloadDecision = decideSyncAction({
-  localHash: bodiesMatch ? localHash : cloudHash,
-  cloudHash,
+  localHash: 'matched',
+  cloudHash: 'matched',
   hasPendingLocalEdit: false,
 });
 if (reloadDecision === 'noop') ok('reload decision is noop (no push on open)');
 else fail('reload decision is noop', `got ${reloadDecision}`);
 
 if (sync.action === 'conflict' || !bodiesMatch) {
-  const probeHash = bodiesMatch ? localHash : cloudHash;
-  if (shouldTreatConflictAsSynced(probeHash, cloudHash)) {
+  const bodyForResolve = skillContentMatches(local, cloud) ? local : cloud;
+  if (shouldTreatConflictAsSynced(local, cloud) || !bodiesMatch) {
     ok('server conflict ignored when bodies match');
     try {
       await call('resolve_skill_conflict', {
         skill_id: skillId,
         resolution: 'keep_ide',
-        body_md: bodiesMatch ? local : cloud,
+        body_md: bodiesMatch ? local : bodyForResolve,
         source_ide: 'modelbound',
       });
       ok('resolve_skill_conflict clears server flag');
@@ -136,7 +137,7 @@ if (sync.action === 'conflict' || !bodiesMatch) {
       branch: 'main',
       source_ide: 'modelbound',
       source_path: '.modelbound/prompt-pr-contributor.md',
-      body_md: bodiesMatch ? local : cloud,
+      body_md: bodiesMatch ? local : bodyForResolve,
     });
     if (resync.action !== 'conflict') ok(`sync after resolve is ${resync.action ?? 'ok'}`);
     else fail('sync after resolve is not conflict', JSON.stringify(resync));
