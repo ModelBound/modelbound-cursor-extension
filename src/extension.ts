@@ -718,15 +718,16 @@ function markSelfWrite(fsPath: string): void {
 
 function shouldSuppressSelfWrite(fsPath: string): boolean {
   const key = path.resolve(fsPath);
-  // Never treat a user edit as an extension-originated write.
-  if (hasPendingLocalEdit(key) || isPathDirty(key)) return false;
   const ts = recentSelfWrites.get(key);
-  if (!ts) return false;
-  if (Date.now() - ts <= SELF_WRITE_SUPPRESS_MS) {
+  if (ts) {
+    if (Date.now() - ts <= SELF_WRITE_SUPPRESS_MS) {
+      recentSelfWrites.delete(key);
+      return true;
+    }
     recentSelfWrites.delete(key);
-    return true;
   }
-  recentSelfWrites.delete(key);
+  // Never treat a real user edit as an extension-originated write.
+  if (hasPendingLocalEdit(key) || isPathDirty(key)) return false;
   return false;
 }
 
@@ -1183,6 +1184,25 @@ export async function activate(context: vscode.ExtensionContext) {
     return { content: parsed.content, id: parsed.id, slug: parsed.slug };
   };
 
+  const dismissConflictIfLocalMatchesCloud = async (
+    filePath: string,
+    localContent: string,
+    cloudSkillId: string,
+    activeApiKey: string,
+  ): Promise<boolean> => {
+    try {
+      const cloud = await fetchSkillFromCloud(cloudSkillId, activeApiKey);
+      if (hashContent(cloud.content) !== hashContent(localContent)) return false;
+      markLastSynced(filePath, localContent, cloud.id);
+      clearPendingLocalEdit(filePath);
+      log(`Sync conflict cleared — local already matches cloud for ${relPath(workspaceRoot, filePath)}`);
+      return true;
+    } catch (err) {
+      log(`Could not verify cloud copy during conflict check: ${(err as Error).message ?? String(err)}`);
+      return false;
+    }
+  };
+
   const writeCloudSkillToPath = (cloud: { content: string; id: string; slug: string | null }, destPath: string): void => {
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     markSelfWrite(destPath);
@@ -1281,12 +1301,16 @@ export async function activate(context: vscode.ExtensionContext) {
     const activeApiKey = await requireApiKeyForSync(`sync ${relativePath}`);
     if (!activeApiKey) return;
     const content = fs.readFileSync(filePath, 'utf8');
-    markPendingLocalEdit(filePath, content);
     if (!manual && shouldSuppressSelfWrite(filePath)) {
-      clearPendingLocalEdit(filePath);
       log(`Skipped self-originated sync for ${relativePath}`);
       return;
     }
+    if (!manual && !isPathDirty(filePath, content)) {
+      clearPendingLocalEdit(filePath);
+      log(`Skipped sync for ${relativePath}: already matches last synced`);
+      return;
+    }
+    markPendingLocalEdit(filePath, content);
     const pathKey = path.resolve(filePath);
     if (inFlightPathSyncs.has(pathKey)) {
       log(`Sync already running for ${relativePath}; queued retry`);
@@ -1316,6 +1340,13 @@ export async function activate(context: vscode.ExtensionContext) {
         // Server returns a JSON-encoded action payload. Handle conflict locally
         // by offering the user an in-IDE force-resolve, rather than just dying.
         if ((syncResult as any)?.action === 'conflict') {
+          const conflictSkillId = (syncResult as any)?.skill_id as string | undefined;
+          if (
+            conflictSkillId &&
+            (await dismissConflictIfLocalMatchesCloud(filePath, content, conflictSkillId, activeApiKey))
+          ) {
+            return;
+          }
           await handleSyncConflict({
             filePath,
             relativePath,
@@ -1323,7 +1354,7 @@ export async function activate(context: vscode.ExtensionContext) {
             content,
             sourceIdeName,
             activeApiKey,
-            conflictSkillId: (syncResult as any)?.skill_id as string | undefined,
+            conflictSkillId,
             message: (syncResult as any)?.message,
           });
           return;
@@ -1357,8 +1388,17 @@ export async function activate(context: vscode.ExtensionContext) {
       log(`Skipped auto-sync for ${relativePath}: modelbound.autoSync is off.`);
       return;
     }
+    if (shouldSuppressSelfWrite(filePath)) {
+      log(`Skipped auto-sync for ${relativePath}: extension-originated write`);
+      return;
+    }
     try {
       const content = fs.readFileSync(filePath, 'utf8');
+      if (!isPathDirty(filePath, content)) {
+        clearPendingLocalEdit(filePath);
+        log(`Skipped auto-sync for ${relativePath}: already synced`);
+        return;
+      }
       markPendingLocalEdit(filePath, content);
     } catch {
       /* file may have been deleted */
@@ -1590,6 +1630,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
       if (isPathDirty(filePath, localContent)) {
         log(`Open reconcile: ${relativePath} has local edits — pushing to cloud`);
+      } else if (cloudHash === localHash) {
+        markLastSynced(filePath, localContent, cloud.id);
+        log(`Open reconcile: ${relativePath} already in sync with cloud`);
+        return;
       } else {
         log(`Open reconcile: ${relativePath} differs from cloud; checking sync status…`);
       }
@@ -1605,6 +1649,13 @@ export async function activate(context: vscode.ExtensionContext) {
       );
 
       if ((syncResult as any)?.action === 'conflict') {
+        const conflictSkillId = (syncResult as any)?.skill_id as string | undefined;
+        if (
+          conflictSkillId &&
+          (await dismissConflictIfLocalMatchesCloud(filePath, localContent, conflictSkillId, activeApiKey))
+        ) {
+          return;
+        }
         await handleSyncConflict({
           filePath,
           relativePath,
