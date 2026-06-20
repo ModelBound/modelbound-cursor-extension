@@ -12,11 +12,35 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm install
-      - run: npm run compile
-      - run: npx --yes @vscode/vsce publish --no-dependencies
+
+      - name: Verify marketplace secrets
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$VSCE_PAT" ]; then
+            echo "::error::VSCE_PAT is missing. Add it under Settings → Secrets and variables → Actions for this repo (or grant org secret access to modelbound-cursor-extension)."
+            exit 1
+          fi
+          if [ -z "$OVSX_PAT" ]; then
+            echo "::warning::OVSX_PAT is missing; Open VSX publish will be skipped."
+          fi
+
+      - run: npm install
+      - run: npm run compile
+
+      - name: Publish to VS Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce publish --no-dependencies
+
       - name: Publish to Open VSX
-        run: npx --yes ovsx publish --no-dependencies -p "${{ secrets.OVSX_PAT }}"
-        continue-on-error: true
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then
+            echo "OVSX_PAT not set; skipping Open VSX."
+            exit 0
+          fi
+          npx --yes ovsx publish --no-dependencies -p "$OVSX_PAT"
