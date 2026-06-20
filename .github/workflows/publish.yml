@@ -1,5 +1,6 @@
 name: publish
 on:
+  workflow_dispatch:
   push:
     tags: ['v*']
 jobs:
@@ -8,11 +9,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+        with:
+          node-version: 20
+          cache: npm
       - run: npm install
-      - run: npm run build
+      - run: npm run compile
       - run: npx --yes @vscode/vsce publish --no-dependencies
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-      - run: npx --yes ovsx publish --no-dependencies -p ${{ secrets.OVSX_PAT }}
-        if: ${{ secrets.OVSX_PAT != '' }}
+      - name: Publish to Open VSX
+        run: npx --yes ovsx publish --no-dependencies -p "${{ secrets.OVSX_PAT }}"
+        continue-on-error: true

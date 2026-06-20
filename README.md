@@ -164,6 +164,20 @@ This extension is open-sourced so enterprise security teams can audit exactly wh
 
 ---
 
+## Related projects
+
+| Project | Description |
+| --- | --- |
+| [ModelBound CLI](https://github.com/ModelBound/modelbound-cli) · [npm](https://www.npmjs.com/package/modelbound) | Terminal + CI for token optimization, skill pipeline, and version management |
+| [ModelBound MCP Server](https://github.com/ModelBound/modelbound-mcp-server) · [npm](https://www.npmjs.com/package/modelbound-mcp) | Local-first MCP server for skill lint, convert, and cloud sync |
+| [Cursor Plugin](https://github.com/ModelBound/cursor-plugin) | Cursor slash commands for pipeline, trust & safety, and versions |
+| [Claude Code Plugin](https://github.com/ModelBound/modelbound-claude-code-plugin) | Claude Code plugin for pipeline, hooks, and skill sync |
+| [Dev Packs](https://github.com/ModelBound/dev-packs) | Open-source curated AI context packs for engineering teams |
+
+Also on [Open VSX](https://open-vsx.org/extension/ModelBound/modelbound-cursor-extension). Install hub: [modelbound.co/connect](https://modelbound.co/connect)
+
+---
+
 ## Contributing
 
 1. Clone and install:
