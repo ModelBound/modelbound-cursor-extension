@@ -12,6 +12,7 @@ import { SkillCodeLensProvider } from './skill-lens';
 import { registerTestOptimizeCommands } from './test-optimize';
 import { callHostedTool } from './mcp-hosted';
 import { openVersionsWebview } from './versionsWebview';
+import { decideSyncAction, shouldTreatConflictAsSynced } from './sync-state';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -1189,17 +1190,69 @@ export async function activate(context: vscode.ExtensionContext) {
     localContent: string,
     cloudSkillId: string,
     activeApiKey: string,
+    sourceIdeName?: string,
   ): Promise<boolean> => {
     try {
       const cloud = await fetchSkillFromCloud(cloudSkillId, activeApiKey);
-      if (hashContent(cloud.content) !== hashContent(localContent)) return false;
+      const localHash = hashContent(localContent);
+      const cloudHash = hashContent(cloud.content);
+      if (!shouldTreatConflictAsSynced(localHash, cloudHash)) return false;
       markLastSynced(filePath, localContent, cloud.id);
       clearPendingLocalEdit(filePath);
       log(`Sync conflict cleared — local already matches cloud for ${relPath(workspaceRoot, filePath)}`);
+      if (sourceIdeName) {
+        try {
+          await callHostedTool(
+            (name, a) => callMcpTool(mcpUrl, activeApiKey, name, a),
+            'resolve_skill_conflict',
+            {
+              skill_id: cloud.id,
+              resolution: 'keep_ide',
+              body_md: localContent,
+              source_ide: sourceIdeName,
+            },
+          );
+          log(`Cleared server conflict flag for ${cloud.id}`);
+        } catch (resolveErr) {
+          log(`Optional conflict resolve failed: ${(resolveErr as Error).message ?? String(resolveErr)}`);
+        }
+      }
       return true;
     } catch (err) {
       log(`Could not verify cloud copy during conflict check: ${(err as Error).message ?? String(err)}`);
       return false;
+    }
+  };
+
+  const planSyncAgainstCloud = async (
+    filePath: string,
+    localContent: string,
+    slugSkillId: string,
+    activeApiKey: string,
+  ): Promise<
+    | { action: 'noop'; cloud: { content: string; id: string; slug: string | null } }
+    | { action: 'pull'; cloud: { content: string; id: string; slug: string | null } }
+    | { action: 'push' }
+    | { action: 'unknown' }
+  > => {
+    const cloudSkillId = resolveCloudSkillId(filePath, slugSkillId);
+    try {
+      const cloud = await fetchSkillFromCloud(cloudSkillId, activeApiKey);
+      const localHash = hashContent(localContent);
+      const cloudHash = hashContent(cloud.content);
+      const lastSynced = getLastSyncedHash(filePath);
+      const action = decideSyncAction({
+        localHash,
+        cloudHash,
+        lastSyncedHash: lastSynced?.hash,
+        hasPendingLocalEdit: hasPendingLocalEdit(filePath),
+      });
+      if (action === 'noop') return { action: 'noop', cloud };
+      if (action === 'pull') return { action: 'pull', cloud };
+      return { action: 'push' };
+    } catch (err) {
+      log(`Cloud sync plan failed for ${relPath(workspaceRoot, filePath)}: ${(err as Error).message ?? String(err)}`);
+      return { action: 'unknown' };
     }
   };
 
@@ -1325,6 +1378,21 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       const { repoUrl, branch } = getRepoInfo(workspaceRoot);
       const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
+      const plan = await planSyncAgainstCloud(filePath, content, skillId, activeApiKey);
+      if (plan.action === 'noop') {
+        markLastSynced(filePath, content, plan.cloud.id);
+        registerSkill(plan.cloud.id, plan.cloud.slug, filePath);
+        clearPendingLocalEdit(filePath);
+        log(`Skipped sync for ${relativePath}: local matches cloud`);
+        vscode.window.setStatusBarMessage(`$(check) ModelBound: ${skillId} up to date`, 2000);
+        return;
+      }
+      if (plan.action === 'pull') {
+        log(`Auto-pulling cloud update for ${relativePath} instead of pushing`);
+        writeCloudSkillToPath(plan.cloud, filePath);
+        vscode.window.setStatusBarMessage(`$(cloud-download) ModelBound: Pulled latest for ${skillId}`, 3000);
+        return;
+      }
       log(`Syncing ${relativePath} → ModelBound (source=${sourceIdeName}, repo=${repoUrl ?? 'none'}, branch=${branch ?? 'none'})`);
       const syncResult = await pushSkillFromIde(
         mcpUrl,
@@ -1343,7 +1411,13 @@ export async function activate(context: vscode.ExtensionContext) {
           const conflictSkillId = (syncResult as any)?.skill_id as string | undefined;
           if (
             conflictSkillId &&
-            (await dismissConflictIfLocalMatchesCloud(filePath, content, conflictSkillId, activeApiKey))
+            (await dismissConflictIfLocalMatchesCloud(
+              filePath,
+              content,
+              conflictSkillId,
+              activeApiKey,
+              sourceIdeName,
+            ))
           ) {
             return;
           }
@@ -1593,51 +1667,36 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       log(`Open reconcile: checking ${relativePath} against ModelBound…`);
       const localContent = fs.readFileSync(filePath, 'utf8');
-      const localHash = hashContent(localContent);
-      const lastSynced = getLastSyncedHash(filePath);
-      const cloudSkillId = resolveCloudSkillId(filePath, skillId);
+      const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
+      const plan = await planSyncAgainstCloud(filePath, localContent, skillId, activeApiKey);
 
-      let cloud: ParsedSkillPayload;
-      try {
-        cloud = await fetchSkillViaMcp(mcpUrl, activeApiKey, cloudSkillId, log);
-      } catch (err) {
-        log(`Open reconcile: no cloud copy for ${skillId} (${(err as Error).message})`);
-        return;
-      }
-      registerSkill(cloud.id, cloud.slug, filePath);
-
-      const cloudHash = hashContent(cloud.content);
-      if (cloudHash === localHash) {
-        markLastSynced(filePath, localContent, cloud.id);
+      if (plan.action === 'noop') {
+        markLastSynced(filePath, localContent, plan.cloud.id);
+        registerSkill(plan.cloud.id, plan.cloud.slug, filePath);
+        clearPendingLocalEdit(filePath);
         log(`Open reconcile: ${relativePath} already matches cloud`);
         return;
       }
-
-      // Only pull when local is unchanged since our last sync AND cloud moved since then.
-      if (lastSynced && lastSynced.hash === localHash && cloudHash !== lastSynced.hash) {
-        if (hasPendingLocalEdit(filePath) || isPathDirty(filePath, localContent)) {
-          log(`Open reconcile: ${relativePath} has pending local edits — pushing instead of pulling`);
-        } else {
-          log(`Open reconcile: pulling cloud update for ${relativePath}`);
-          writeCloudSkillToPath(cloud, filePath);
-          vscode.window.setStatusBarMessage(
-            `$(cloud-download) ModelBound: Pulled latest for ${cloud.slug ?? skillId}`,
-            3000,
-          );
-          return;
-        }
-      }
-
-      if (isPathDirty(filePath, localContent)) {
-        log(`Open reconcile: ${relativePath} has local edits — pushing to cloud`);
-      } else if (cloudHash === localHash) {
-        markLastSynced(filePath, localContent, cloud.id);
-        log(`Open reconcile: ${relativePath} already in sync with cloud`);
+      if (plan.action === 'pull') {
+        log(`Open reconcile: pulling cloud update for ${relativePath}`);
+        writeCloudSkillToPath(plan.cloud, filePath);
+        vscode.window.setStatusBarMessage(
+          `$(cloud-download) ModelBound: Pulled latest for ${plan.cloud.slug ?? skillId}`,
+          3000,
+        );
         return;
-      } else {
-        log(`Open reconcile: ${relativePath} differs from cloud; checking sync status…`);
       }
-      const sourceIdeName = sourceIdeFromPath(workspaceRoot, filePath, ide);
+      if (plan.action === 'unknown') {
+        log(`Open reconcile: skipped ${relativePath} (cloud lookup failed)`);
+        return;
+      }
+
+      if (!isPathDirty(filePath, localContent)) {
+        log(`Open reconcile: ${relativePath} unchanged since last sync — skipping push`);
+        return;
+      }
+
+      log(`Open reconcile: ${relativePath} has local edits — pushing to cloud`);
       const syncResult = await pushSkillFromIde(
         mcpUrl,
         activeApiKey,
@@ -1652,7 +1711,13 @@ export async function activate(context: vscode.ExtensionContext) {
         const conflictSkillId = (syncResult as any)?.skill_id as string | undefined;
         if (
           conflictSkillId &&
-          (await dismissConflictIfLocalMatchesCloud(filePath, localContent, conflictSkillId, activeApiKey))
+          (await dismissConflictIfLocalMatchesCloud(
+            filePath,
+            localContent,
+            conflictSkillId,
+            activeApiKey,
+            sourceIdeName,
+          ))
         ) {
           return;
         }
@@ -1669,8 +1734,8 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const returnedId = (syncResult as any)?.skill_id || cloud.id;
-      const returnedSlug = (syncResult as any)?.slug || cloud.slug || skillId;
+      const returnedId = (syncResult as any)?.skill_id || resolveCloudSkillId(filePath, skillId);
+      const returnedSlug = (syncResult as any)?.slug || skillId;
       markLocalPush(returnedId);
       if (returnedSlug && returnedSlug !== returnedId) markLocalPush(returnedSlug);
       registerSkill(returnedId, returnedSlug, filePath);
