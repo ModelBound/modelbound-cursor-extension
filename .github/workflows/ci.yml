@@ -12,4 +12,7 @@ jobs:
       - run: npm install
       - run: npm run compile
       - run: npm run test:unit
+      - name: Extension host smoke (main only)
+        if: github.ref == 'refs/heads/main'
+        run: npm test
       - run: npx --yes @vscode/vsce package --no-dependencies
