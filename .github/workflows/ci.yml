@@ -11,4 +11,5 @@ jobs:
         with: { node-version: 20, cache: npm }
       - run: npm install
       - run: npm run compile
+      - run: npm run test:unit
       - run: npx --yes @vscode/vsce package --no-dependencies

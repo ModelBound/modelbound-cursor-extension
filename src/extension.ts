@@ -13,6 +13,7 @@ import { registerTestOptimizeCommands } from './test-optimize';
 import { callHostedTool } from './mcp-hosted';
 import { openVersionsWebview } from './versionsWebview';
 import { decideSyncAction, normalizeSkillContent, shouldTreatConflictAsSynced, skillContentMatches } from './sync-state';
+import { isModelBoundErrorContent, parseSkillMcpPayload, type ParsedSkillPayload } from './skillMcpParse';
 
 const WATCH_GLOBS = [
   '.modelbound/**/*.md',
@@ -633,41 +634,6 @@ function skillIdFromPath(workspaceRoot: string, fsPath: string): string {
   const nativeSkillFile = rel.match(/^(?:\.agents\/skills|\.kiro\/skills|\.claude\/skills)\/([^/]+)\/SKILL\.md$/);
   if (nativeSkillFile) return nativeSkillFile[1];
   return path.basename(fsPath, path.extname(fsPath));
-}
-
-function isModelBoundErrorContent(content: string): boolean {
-  const normalized = content.trim().toLowerCase();
-  return (
-    /^skill not found\b/.test(normalized) ||
-    /^not found\b/.test(normalized) ||
-    /^error[:\s]/.test(normalized)
-  );
-}
-
-type ParsedSkillPayload = {
-  content: string;
-  id: string;
-  slug: string | null;
-  sourcePath: string | null;
-};
-
-function parseSkillMcpPayload(data: unknown, skillId: string): ParsedSkillPayload | null {
-  if (!data) return null;
-  const content =
-    (typeof data === 'object' &&
-    data !== null &&
-    'text' in data &&
-    typeof (data as { text?: unknown }).text === 'string'
-      ? (data as { text: string }).text
-      : typeof data === 'string'
-        ? data
-        : '') || '';
-  if (!content) return null;
-  const obj = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
-  const id = String(obj?.skill_id ?? obj?.id ?? skillId);
-  const slug = typeof obj?.slug === 'string' ? obj.slug : null;
-  const sourcePath = typeof obj?.source_path === 'string' ? obj.source_path : null;
-  return { content, id, slug, sourcePath };
 }
 
 async function fetchSkillViaMcp(
