@@ -17,6 +17,7 @@ jobs:
         run: xvfb-run -a npm test
       - name: Package VSIX (marketplace readme omits external SVG badges)
         run: |
-          grep -v 'modelbound.co/api/badge/skills.svg' README.md > README.vscode.md
-          npx --yes @vscode/vsce package --no-dependencies --readme-path README.vscode.md
-          rm README.vscode.md
+          cp README.md README.md.bak
+          grep -v 'modelbound.co/api/badge/skills.svg' README.md.bak > README.md
+          npx --yes @vscode/vsce package --no-dependencies
+          mv README.md.bak README.md
