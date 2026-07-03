@@ -1,7 +1,7 @@
 # ModelBound — Cursor Rules Sync, AI Skills Manager & MCP Prompt Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![ModelBound Skill Trust](https://modelbound.co/api/badge/skills.svg?repo=ModelBound/modelbound-cursor-extension)](https://modelbound.co/connect/github-actions)
+[![ModelBound Skill Trust](https://modelbound.co/api/badge/skills.svg?repo=ModelBound/modelbound-cursor-extension)](https://modelbound.co/connect/github-actions?repo=ModelBound/modelbound-cursor-extension)
 
 **The system prompt version control layer for your IDE.** Keep your Cursor rules, Claude Code skills, `.cursorrules`, and AI knowledge bases in sync between your workspace and [ModelBound.co](https://modelbound.co) — automatically. The ModelBound MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared prompts, eval results, and token-health insights.
 
