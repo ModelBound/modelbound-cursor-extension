@@ -15,4 +15,7 @@ jobs:
       - name: Extension host smoke (main only)
         if: github.ref == 'refs/heads/main'
         run: xvfb-run -a npm test
-      - run: npx --yes @vscode/vsce package --no-dependencies
+      - name: Package VSIX (marketplace readme omits external SVG badges)
+        run: |
+          grep -v 'modelbound.co/api/badge/skills.svg' README.md > /tmp/README.vscode.md
+          npx --yes @vscode/vsce package --no-dependencies --readme-path /tmp/README.vscode.md
