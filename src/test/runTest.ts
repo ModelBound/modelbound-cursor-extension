@@ -13,7 +13,13 @@ async function main(): Promise<void> {
     await runTests({
       extensionDevelopmentPath,
       extensionTestsPath,
-      launchArgs: [testWorkspace, '--disable-extensions', `--user-data-dir=${userDataDir}`],
+      launchArgs: [
+        testWorkspace,
+        '--disable-extensions',
+        '--disable-gpu',
+        '--no-sandbox',
+        `--user-data-dir=${userDataDir}`,
+      ],
     });
   } catch (err) {
     console.error('Failed to run extension tests', err);
