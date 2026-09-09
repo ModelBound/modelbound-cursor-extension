@@ -68,6 +68,7 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "tsc -p tsconfig.json",
+    "compile": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
     "package": "vsce package --no-dependencies"
   },
