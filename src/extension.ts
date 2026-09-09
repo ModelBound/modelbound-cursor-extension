@@ -12,6 +12,7 @@ import { SkillCodeLensProvider } from './skill-lens';
 import { registerTestOptimizeCommands } from './test-optimize';
 import { callHostedTool } from './mcp-hosted';
 import { openVersionsWebview } from './versionsWebview';
+import { reportOutcome, showReliability, type Verdict } from './outcomes';
 import { decideSyncAction, normalizeSkillContent, shouldTreatConflictAsSynced, skillContentMatches } from './sync-state';
 import { isModelBoundErrorContent, parseSkillMcpPayload, type ParsedSkillPayload } from './skillMcpParse';
 
@@ -2293,6 +2294,23 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   // 12. Show Health
+  const reportOutcomeCommand = vscode.commands.registerCommand(
+    'modelbound.reportOutcome',
+    async (arg?: { slug?: string; verdict?: Verdict }) => {
+      const editor = vscode.window.activeTextEditor;
+      const slug = arg?.slug ?? (editor ? path.basename(editor.document.uri.fsPath).replace(/\.(md|mdx|mdc)$/i, '') : undefined);
+      if (!slug) {
+        vscode.window.showWarningMessage('ModelBound: open a skill file before reporting an outcome.');
+        return;
+      }
+      await reportOutcome(() => getCtx(context.secrets), slug, arg?.verdict);
+    },
+  );
+
+  const reliabilityCommand = vscode.commands.registerCommand('modelbound.reliability', async () => {
+    await showReliability(() => getCtx(context.secrets));
+  });
+
   const showHealthCommand = vscode.commands.registerCommand('modelbound.showHealth', async () => {
     if (!apiKey) { vscode.window.showWarningMessage('ModelBound: Set your API key first.'); return; }
     vscode.window.setStatusBarMessage(`$(loading~spin) ModelBound: Checking health...`, 3000);
@@ -2403,6 +2421,8 @@ export async function activate(context: vscode.ExtensionContext) {
     diffVersionsCommand,
     legacyDiffCommand,
     showHealthCommand,
+    reportOutcomeCommand,
+    reliabilityCommand,
     optimizeCommand,
     legacyBenchmarkCommand,
     restoreCommand,

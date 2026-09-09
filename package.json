@@ -1,9 +1,9 @@
 {
   "name": "modelbound-cursor-extension",
-  "displayName": "ModelBound — AI Context, Skills & MCP Sync for Cursor",
+  "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
-  "version": "1.9.25",
+  "version": "1.10.0",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -67,7 +67,7 @@
         "modelbound.authUrl": {
           "type": "string",
           "default": "https://modelbound.co/api/extension-device-auth",
-          "description": "ModelBound device authorization endpoint (advanced — usually leave default)."
+          "description": "ModelBound device authorization endpoint (advanced \u2014 usually leave default)."
         },
         "modelbound.apiUrl": {
           "type": "string",
@@ -125,7 +125,7 @@
       },
       {
         "command": "modelbound.filterSkills",
-        "title": "ModelBound: Filter Skills…"
+        "title": "ModelBound: Filter Skills\u2026"
       },
       {
         "command": "modelbound.runSkillTest",
@@ -189,15 +189,23 @@
       },
       {
         "command": "modelbound.restore",
-        "title": "ModelBound: Restore Version…"
+        "title": "ModelBound: Restore Version\u2026"
       },
       {
         "command": "modelbound.diff",
-        "title": "ModelBound: Diff Versions…"
+        "title": "ModelBound: Diff Versions\u2026"
       },
       {
         "command": "modelbound.versions",
         "title": "ModelBound: Show Versions"
+      },
+      {
+        "command": "modelbound.reportOutcome",
+        "title": "ModelBound: Report Skill Outcome\u2026"
+      },
+      {
+        "command": "modelbound.reliability",
+        "title": "ModelBound: Show Skill Reliability"
       }
     ]
   },

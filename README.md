@@ -202,3 +202,12 @@ npm run watch
 ## License
 
 Distributed under the terms of the [MIT License](LICENSE).
+
+## Feedback loop
+
+| Command | What it does |
+|---------|--------------|
+| **ModelBound: Report Skill Outcome…** | Record worked / partly worked / went wrong for the active skill, with a failure category, optional note, and selected output excerpt. |
+| **ModelBound: Show Skill Reliability** | Show per-skill reliability for the last 30 days. |
+
+Outcome reports measure skill quality after real use. Repeated failures are grouped and diagnosed in ModelBound, where a minimal fix and regression test can be reviewed.
