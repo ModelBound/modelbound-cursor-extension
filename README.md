@@ -211,3 +211,21 @@ Distributed under the terms of the [MIT License](LICENSE).
 | **ModelBound: Show Skill Reliability** | Show per-skill reliability for the last 30 days. |
 
 Outcome reports measure skill quality after real use. Repeated failures are grouped and diagnosed in ModelBound, where a minimal fix and regression test can be reviewed.
+
+## The agent harness
+
+The pipeline panel now shows a fourth check alongside trust, latency and tests:
+**Safety** — a deterministic read on whether the skill is cleared to run
+unattended, across context, permissions, guardrails, verification. It arrives with the existing pipeline result, so
+there is nothing to configure.
+
+A skill that fails the gate is labelled *supervised only*, with the blocking
+reasons and a suggested fix for each. Presets for the three common postures live
+in `presets/harness.json`.
+
+## Tracing
+
+Runs reported through the MCP server (`report_run`), the CLI (`mb trace`)
+or any OpenTelemetry exporter appear under **Live runs** on the skill page:
+a per-version scorecard and a step-by-step timeline. Summaries only; see
+`docs/TRACING.md`.
