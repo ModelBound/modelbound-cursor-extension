@@ -4,9 +4,9 @@
 // editor is indistinguishable from one made anywhere else.
 import * as vscode from "vscode";
 import { api, ApiCtx } from "./api.js";
+import { type Verdict, VERDICTS } from "./feedbackVocabulary.js";
 
-export const VERDICTS = ["worked", "partial", "failed"] as const;
-export type Verdict = (typeof VERDICTS)[number];
+export { VERDICTS, type Verdict };
 
 const CATEGORIES: Array<{ id: string; label: string; detail: string }> = [
   { id: "ignored_rule", label: "Ignored the rule", detail: "The skill states a rule and the agent did not follow it." },
