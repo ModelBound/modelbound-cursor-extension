@@ -30,6 +30,11 @@ jobs:
       - run: npm install
       - run: npm run compile
 
+      - name: Strip external SVG badges from README (VS Marketplace policy)
+        run: |
+          cp README.md README.md.bak
+          grep -v 'modelbound.co/api/badge/skills.svg' README.md.bak > README.md
+
       - name: Publish to VS Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
@@ -44,3 +49,8 @@ jobs:
             exit 0
           fi
           npx --yes ovsx publish --no-dependencies -p "$OVSX_PAT"
+
+      - name: Restore README
+        if: always()
+        run: |
+          if [ -f README.md.bak ]; then mv README.md.bak README.md; fi
