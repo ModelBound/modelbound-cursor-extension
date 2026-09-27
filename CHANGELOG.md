@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.10.4 — 2026-09-27
+
+### Fixed
+- Local `npm test` on macOS with VS Code 1.139+ test downloads (use `Code` when `Electron` binary is absent)
+
 ## 1.10.3 — 2026-09-27
 
 ### Added
