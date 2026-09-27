@@ -29,8 +29,11 @@ jobs:
 
       - name: Package Extension
         run: |
+          cp README.md README.md.bak
+          grep -v 'modelbound.co/api/badge/skills.svg' README.md.bak > README.md
           npm install -g @vscode/vsce
-          vsce package
+          vsce package --no-dependencies
+          mv README.md.bak README.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
