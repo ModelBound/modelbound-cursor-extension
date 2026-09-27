@@ -229,3 +229,13 @@ Runs reported through the MCP server (`report_run`), the CLI (`mb trace`)
 or any OpenTelemetry exporter appear under **Live runs** on the skill page:
 a per-version scorecard and a step-by-step timeline. Summaries only; see
 `docs/TRACING.md`.
+
+## Tests
+
+```bash
+npm run test:validate   # package.json ↔ registerCommand parity
+npm run test:unit       # MCP parse, outcomes vocabulary, harness presets
+npm test                # VS Code extension host (CI uses xvfb-run)
+```
+
+CLI vs extension vs plugin coverage: [docs/PARITY.md](docs/PARITY.md).

@@ -3,7 +3,7 @@
   "displayName": "ModelBound \u2014 AI Context, Skills & MCP Sync for Cursor",
   "icon": "logo_modelbound.png",
   "description": "Cursor rules sync, .cursorrules manager, and system prompt version control. Sync AI skills, rules, and knowledge bases between your IDE and ModelBound.co via MCP. Works with Cursor, Claude Code, Kiro, and Copilot.",
-  "version": "1.10.2",
+  "version": "1.10.3",
   "publisher": "ModelBound",
   "license": "MIT",
   "repository": {
@@ -214,8 +214,10 @@
     "build": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test:unit": "npm run compile && node --test out/skillMcpParse.test.js",
-    "test": "npm run compile && node out/test/runTest.js"
+    "test:validate": "node scripts/validate-manifest.mjs",
+    "test:unit": "npm run compile && node --test out/skillMcpParse.test.js out/outcomes.test.js out/manifestParity.test.js",
+    "test": "npm run compile && node out/test/runTest.js",
+    "test:full": "npm run test:validate && npm run test:unit && npm test"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.1"

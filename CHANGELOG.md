@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.3 — 2026-09-27
+
+### Added
+- Manifest parity tests: every `package.json` command must be registered in source
+- Unit tests for outcome verdict vocabulary (CLI/MCP alignment)
+- `docs/PARITY.md` — extension vs CLI vs plugin coverage
+- `npm run test:validate` and CI extension-host smoke on all PRs
+
 ## 1.9.0 — 2026-06-13
 
 ### Added
