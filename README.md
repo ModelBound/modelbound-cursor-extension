@@ -39,7 +39,14 @@ Stop rebuilding context from scratch every time you change tools. ModelBound mak
 
 ### 1. Install
 
-Search **"ModelBound"** in the Cursor/VS Code Extensions panel, or download the `.vsix` from [GitHub Releases](https://github.com/ModelBound/modelbound-cursor-extension/releases).
+```bash
+# Cursor
+cursor --install-extension ModelBound.modelbound-cursor-extension
+# VS Code
+code --install-extension ModelBound.modelbound-cursor-extension
+```
+
+Or search **"ModelBound"** in the Cursor/VS Code Extensions panel, or download the `.vsix` from [GitHub Releases](https://github.com/ModelBound/modelbound-cursor-extension/releases).
 
 ### 2. Sign In
 
