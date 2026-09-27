@@ -15,6 +15,8 @@ suite('ModelBound extension smoke', () => {
       'modelbound.showSkillVersions',
       'modelbound.optimize',
       'modelbound.showHealth',
+      'modelbound.reportOutcome',
+      'modelbound.reliability',
     ];
     const all = await vscode.commands.getCommands(true);
     for (const cmd of expected) {
