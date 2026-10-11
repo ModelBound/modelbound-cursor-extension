@@ -1,7 +1,7 @@
 # ModelBound — Cursor Rules Sync, AI Skills Manager & MCP Prompt Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![ModelBound Skill Trust](https://modelbound.co/api/badge/skills.svg?repo=ModelBound/modelbound-cursor-extension)](https://modelbound.co/connect/github-actions?repo=ModelBound/modelbound-cursor-extension)
+[![ModelBound Skill Checks](https://modelbound.co/api/badge/skills.svg?repo=ModelBound/modelbound-cursor-extension)](https://modelbound.co/connect/github-actions?repo=ModelBound/modelbound-cursor-extension)
 
 **The system prompt version control layer for your IDE.** Keep your Cursor rules, Claude Code skills, `.cursorrules`, and AI knowledge bases in sync between your workspace and [ModelBound.co](https://modelbound.co) — automatically. The ModelBound MCP server gives Cursor, Claude Code, Copilot, and any MCP client live access to your shared prompts, eval results, and token-health insights.
 
@@ -178,7 +178,7 @@ This extension is open-sourced so enterprise security teams can audit exactly wh
 | --- | --- |
 | [ModelBound CLI](https://github.com/ModelBound/modelbound-cli) · [npm](https://www.npmjs.com/package/modelbound) | Terminal + CI for token optimization, skill pipeline, and version management |
 | [ModelBound MCP Server](https://github.com/ModelBound/modelbound-mcp-server) · [npm](https://www.npmjs.com/package/modelbound-mcp) | Local-first MCP server for skill lint, convert, and cloud sync |
-| [Cursor Plugin](https://github.com/ModelBound/cursor-plugin) | Cursor slash commands for pipeline, trust & safety, and versions |
+| [Cursor Plugin](https://github.com/ModelBound/cursor-plugin) | Cursor slash commands for pipeline, safety checks, and versions |
 | [Claude Code Plugin](https://github.com/ModelBound/modelbound-claude-code-plugin) | Claude Code plugin for pipeline, hooks, and skill sync |
 | [Dev Packs](https://github.com/ModelBound/dev-packs) | Open-source curated AI context packs for engineering teams |
 
@@ -221,7 +221,7 @@ Outcome reports measure skill quality after real use. Repeated failures are grou
 
 ## The agent harness
 
-The pipeline panel now shows a fourth check alongside trust, latency and tests:
+The pipeline panel now shows a fourth check alongside readiness checks, latency and tests:
 **Safety** — a deterministic read on whether the skill is cleared to run
 unattended, across context, permissions, guardrails, verification. It arrives with the existing pipeline result, so
 there is nothing to configure.

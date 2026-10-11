@@ -159,7 +159,7 @@ await test('get_skill_pipeline_status', () =>
 );
 
 await test('set_skill_pipeline_config', () =>
-  callHosted('set_skill_pipeline_config', { skill_id: SKILL_ID, min_trust_score: 60 }),
+  callHosted('set_skill_pipeline_config', { skill_id: SKILL_ID, max_latency_ms: 5000 }),
 );
 
 await test('benchmark_skill', () =>

@@ -1,5 +1,12 @@
 # Changelog
 
+
+## 1.11.0 — 2026-10-11
+
+### Changed
+- Removed the numeric trust score. The CodeLens and Test & Optimize panel show pass / warnings / blocking from findings.
+- Gate settings configure latency and saved-test gates only (no trust threshold). Harness presets drop `min_trust`.
+
 ## 1.10.4 — 2026-09-27
 
 ### Fixed
