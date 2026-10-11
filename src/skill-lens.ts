@@ -1,4 +1,4 @@
-// Skill CodeLens provider — trust score, versions, and Test & Optimize quick actions.
+// Skill CodeLens provider — check status (pass / warnings / blocking), versions, and Test & Optimize quick actions.
 import * as vscode from 'vscode';
 import { isSkillFile } from './skillDetect';
 
@@ -16,7 +16,7 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
   private apiKey: string;
   private mcpUrl: string;
   private resolveTarget: (document: vscode.TextDocument) => SkillLensTarget | null;
-  private cache = new Map<string, { trust?: number; critical?: number; ts: number }>();
+  private cache = new Map<string, { critical: number; warnings: number; ts: number }>();
   private cacheTtlMs = 60_000;
 
   constructor(
@@ -52,10 +52,13 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
     const lenses: vscode.CodeLens[] = [];
     const range = new vscode.Range(headerLine, 0, headerLine, 0);
 
-    const trustText =
-      cached?.trust != null
-        ? `$(shield) Trust ${cached.trust}/100${cached.critical ? ` · ${cached.critical} critical` : ''}`
-        : '$(shield) Trust & Safety';
+    const trustText = !cached
+      ? '$(shield) Checks'
+      : cached.critical
+        ? `$(error) ${cached.critical} blocking`
+        : cached.warnings
+          ? `$(warning) ${cached.warnings} warning${cached.warnings === 1 ? '' : 's'}`
+          : '$(pass) Checks pass';
     lenses.push(
       new vscode.CodeLens(range, {
         title: trustText,
@@ -129,11 +132,12 @@ export class SkillCodeLensProvider implements vscode.CodeLensProvider {
         if (line) parsed = JSON.parse(line);
       }
       const payload = parsed?.result?.structuredContent;
-      if (!payload?.scores) return;
-      const critical = (payload.findings as Array<{ severity?: string; ignored?: boolean }> | undefined)?.filter(
-        (f) => !f.ignored && String(f.severity).toLowerCase() === 'critical',
-      ).length;
-      this.cache.set(skillId, { trust: payload.scores.total, critical, ts: Date.now() });
+      if (!payload || !Array.isArray(payload.findings)) return;
+      const open = (payload.findings as Array<{ severity?: string; ignored?: boolean }>).filter((f) => !f.ignored);
+      const sev = (f: { severity?: string }) => String(f.severity).toLowerCase();
+      const critical = open.filter((f) => sev(f) === 'critical').length;
+      const warnings = open.filter((f) => sev(f) === 'warn' || sev(f) === 'warning').length;
+      this.cache.set(skillId, { critical, warnings, ts: Date.now() });
       this._onDidChangeCodeLenses.fire();
     } catch {
       /* silent */

@@ -12,14 +12,7 @@ export type SkillFinding = {
 
 export type SkillFindingsPayload = {
   skill_id: string;
-  scores?: {
-    total?: number;
-    clarity?: number;
-    safety?: number;
-    fit?: number;
-    ai_fit_score?: number;
-    ai_fit_reason?: string;
-  };
+  fit_reason?: string | null;
   findings?: SkillFinding[];
   ignored_keys?: string[];
   updated_at?: string;
@@ -79,7 +72,7 @@ function formatJson(value: unknown): string {
 }
 
 function renderFindingsRows(findings: SkillFinding[]): string {
-  if (!findings.length) return '<div class="meta">No findings — trust scan is clean.</div>';
+  if (!findings.length) return '<div class="meta">No findings — all checks pass.</div>';
   return findings
     .map((f) => {
       const sev = (f.severity || 'info').toLowerCase();
@@ -127,18 +120,17 @@ function panelHtml(
     evalResults?: unknown;
   },
 ): string {
-  const scores = state.findings?.scores ?? {};
-  const scoreCards = [
-    ['Trust', scores.total],
-    ['Clarity', scores.clarity],
-    ['Safety', scores.safety],
-    ['Fit', scores.fit],
-  ]
-    .map(
-      ([name, val]) =>
-        `<div class="score"><div class="score-label">${name}</div><div class="score-val">${val ?? '—'}</div></div>`,
-    )
-    .join('');
+  const open = (state.findings?.findings ?? []).filter((f) => !f.ignored);
+  const sevOf = (f: SkillFinding) => (f.severity || '').toLowerCase();
+  const blocking = open.filter((f) => sevOf(f) === 'critical').length;
+  const warnings = open.filter((f) => sevOf(f) === 'warn' || sevOf(f) === 'warning').length;
+  const checkStatus = !state.findings
+    ? '<span class="badge b-idle">not checked</span>'
+    : blocking
+      ? `<span class="badge b-fail">${blocking} blocking</span> <span class="meta">Fix before publishing.</span>`
+      : warnings
+        ? `<span class="badge sev-warn">${warnings} warning${warnings === 1 ? '' : 's'}</span> <span class="meta">Won't block publishing.</span>`
+        : '<span class="badge b-pass">checks pass</span>';
 
   const latestRun = state.pipelineRuns?.[0];
   const runMeta = latestRun
@@ -165,10 +157,6 @@ function panelHtml(
   h2 { margin: 0 0 4px; font-size: 14px; }
   h3 { margin: 16px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--vscode-descriptionForeground); }
   .sub { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 12px; }
-  .scores { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
-  .score { background: var(--vscode-textCodeBlock-background); border-radius: 6px; padding: 8px; text-align: center; }
-  .score-label { font-size: 10px; color: var(--vscode-descriptionForeground); text-transform: uppercase; }
-  .score-val { font-size: 18px; font-weight: 600; margin-top: 2px; }
   .toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   .btn { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
   .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
@@ -194,7 +182,7 @@ function panelHtml(
 <body>
 <h2>Test &amp; Optimize</h2>
 <div class="sub">Skill: <code>${escapeHtml(label)}</code></div>
-<div class="scores">${scoreCards}</div>
+<div class="row" style="border-top:none">${checkStatus}</div>
 <div class="toolbar">
   <button class="btn btn-secondary" data-act="refresh">Refresh all</button>
   <button class="btn" data-act="pipeline">Run Test &amp; Optimize</button>
@@ -206,7 +194,7 @@ function panelHtml(
 <div id="pipeline-stages">${renderPipelineStages(latestRun?.stage_results as Record<string, unknown> | undefined)}</div>
 ${history ? `<div style="margin-top:8px">${history}</div>` : ''}
 
-<h3>Trust &amp; Safety</h3>
+<h3>Safety &amp; quality findings</h3>
 <div id="findings">${renderFindingsRows(state.findings?.findings ?? [])}</div>
 <div class="toolbar">
   <button class="btn btn-secondary" data-act="benchmark">Benchmark latency</button>
@@ -394,7 +382,7 @@ async function openTestOptimizePanel(
           finding_key: msg.finding_key,
         });
         vscode.window.showInformationMessage(
-          'ModelBound: Finding ignored. Re-run the pipeline to update the trust score.',
+          'ModelBound: Finding ignored. Re-run the pipeline to update the checks.',
         );
         panelState.findings = await fetchSkillFindings(deps.callMcp, skillUuid);
         panel.webview.postMessage({
@@ -540,17 +528,16 @@ export function registerTestOptimizeCommands(context: vscode.ExtensionContext, d
       if (!target) return;
       const apiKey = deps.getApiKey()!;
       const skillUuid = await deps.ensureSkillSynced(deps.getMcpUrl(), apiKey, deps.workspaceRoot, target, deps.log);
-      const minTrust = await vscode.window.showInputBox({
-        prompt: 'Minimum trust score (0–100, blank = unchanged)',
-        value: '60',
+      const maxLatency = await vscode.window.showInputBox({
+        prompt: 'Max latency budget in ms (blank = unchanged)',
       });
-      const enforceTrust = await vscode.window.showQuickPick(['Enforce trust gate', 'Do not enforce trust gate'], {
-        placeHolder: 'Trust gate',
+      const enforceTests = await vscode.window.showQuickPick(['Require saved tests to pass', 'Do not require tests'], {
+        placeHolder: 'Tests gate',
       });
       const args: Record<string, unknown> = { skill_id: skillUuid };
-      if (minTrust?.trim()) args.min_trust_score = Number(minTrust);
-      if (enforceTrust?.startsWith('Enforce')) args.enforce_trust_gate = true;
-      if (enforceTrust?.startsWith('Do not')) args.enforce_trust_gate = false;
+      if (maxLatency?.trim()) args.max_latency_ms = Number(maxLatency);
+      if (enforceTests?.startsWith('Require')) args.enforce_tests_gate = true;
+      if (enforceTests?.startsWith('Do not')) args.enforce_tests_gate = false;
       await callHostedTool(deps.callMcp, 'set_skill_pipeline_config', args);
       vscode.window.showInformationMessage('ModelBound: Pipeline gate configuration saved.');
     },
@@ -564,7 +551,7 @@ export function registerTestOptimizeCommands(context: vscode.ExtensionContext, d
       const apiKey = deps.getApiKey()!;
       const skillUuid = await deps.ensureSkillUuid(deps.getMcpUrl(), apiKey, target, deps.log);
       await callHostedTool(deps.callMcp, 'ignore_skill_finding', { skill_id: skillUuid, finding_key: findingKey });
-      vscode.window.showInformationMessage('ModelBound: Finding ignored. Re-run the pipeline to update the trust score.');
+      vscode.window.showInformationMessage('ModelBound: Finding ignored. Re-run the pipeline to update the checks.');
     },
   );
 
