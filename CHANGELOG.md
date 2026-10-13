@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.0 — 2026-10-13
+
+### Added
+- Flight Check: skill, rule and prompt files are scanned offline on open and save. Blocking issues (prompt injection, secrets, exfiltration, destructive commands) show as errors in the Problems panel; warnings for loop traps, wildcard tools and missing output format. No network or AI cost.
+- `ModelBound: Flight Check (safety scan)` command.
+
 
 ## 1.11.0 — 2026-10-11
 
