@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { staticScan } from './flightCheckRules';
-
-const SKILL_FILE = /(SKILL\.md|CLAUDE\.md|AGENTS\.md|\.cursorrules|\.mdc)$|[\\/](\.cursor[\\/]rules|\.claude|\.kiro|skills)[\\/].*\.md$/i;
+import { isSkillFile } from './skillDetect';
 
 /** Flight Check: offline safety scan shown as editor diagnostics. Zero network, zero AI cost. */
 export function registerFlightCheck(context: vscode.ExtensionContext): void {
@@ -22,7 +21,7 @@ export function registerFlightCheck(context: vscode.ExtensionContext): void {
     return r.blocking;
   };
 
-  const auto = (doc: vscode.TextDocument) => { if (SKILL_FILE.test(doc.uri.fsPath)) scan(doc); };
+  const auto = (doc: vscode.TextDocument) => { if (isSkillFile(doc.uri)) scan(doc); };
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(auto),
     vscode.workspace.onDidSaveTextDocument(auto),
