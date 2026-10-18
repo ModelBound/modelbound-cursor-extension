@@ -7,6 +7,10 @@
 
 Open source. Local-first. Zero source code leaves your machine.
 
+### Instant instruction profile — no account needed
+
+Open a `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, Cursor rule, or Copilot instruction file. The status bar shows its estimated token footprint and updates as you type, including unsaved changes. Click it for safety findings and jump to the relevant line. This runs locally with no AI calls. It estimates instruction size, not actual runtime tokens or cost. Sign in only when you want cloud sync and real-run insights.
+
 ---
 
 ## Why ModelBound?

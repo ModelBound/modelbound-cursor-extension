@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { registerFlightCheck } from './flight-check';
+import { registerTokenStatus } from './token-status';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -1015,6 +1016,7 @@ function pipelineHtml(skillLabel: string): string {
 
 export async function activate(context: vscode.ExtensionContext) {
   registerFlightCheck(context);
+  registerTokenStatus(context);
   loadRegistry(context);
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) return;
